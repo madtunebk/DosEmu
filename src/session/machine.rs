@@ -108,7 +108,9 @@ impl Machine {
                 .arg(format!("unix:{},server=on,wait=off", qmp_socket.display()))
                 .arg("-qmp")
                 .arg(format!("unix:{},server=on,wait=off", bridge_socket.display()))
-                .args(["-nic", "none", "-rtc", "base=localtime", "-no-reboot"])
+                // No -no-reboot: a program that crashes the CPU (a triple fault) reboots DOS
+                // instead of quitting QEMU and taking the whole emulator with it.
+                .args(["-nic", "none", "-rtc", "base=localtime"])
                 .env("XDG_RUNTIME_DIR", &runtime_dir)
                 .env("DBUS_SESSION_BUS_ADDRESS", &dbus_address);
             command
@@ -215,17 +217,14 @@ fn has_dbus_audio(qemu_bin: &str) -> bool {
         .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).lines().any(|line| line.trim() == "dbus"))
 }
 
-/// KVM runs DOS directly on the host CPU; TCG emulates every instruction and costs far more.
-/// Auto mode tries KVM when /dev/kvm is usable and falls back to TCG. DOSLAB_ACCEL=kvm|tcg
-/// forces one, e.g. tcg for old games that run too fast at full hardware speed.
+/// TCG (QEMU's software CPU) by default: it runs DOS programs faithfully. KVM runs DOS directly
+/// on the host CPU and is far faster, but real-mode DOS code and memory managers such as JemmEx
+/// hit its edge cases: a game that played fine under TCG took the whole VM down under KVM.
+/// DOSLAB_ACCEL=kvm opts in (falling back to TCG if QEMU won't start with it).
 fn accelerators() -> Vec<&'static str> {
     match std::env::var("DOSLAB_ACCEL").as_deref() {
-        Ok("kvm") => vec!["kvm"],
-        Ok("tcg") => vec!["tcg"],
-        _ => {
-            let kvm_usable = std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_ok();
-            if kvm_usable { vec!["kvm", "tcg"] } else { vec!["tcg"] }
-        }
+        Ok("kvm") => vec!["kvm", "tcg"],
+        _ => vec!["tcg"],
     }
 }
 
