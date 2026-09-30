@@ -152,8 +152,12 @@ impl Machine {
 /// Standard PC floppy image sizes: 360K, 720K, 1.2M, 1.44M, 2.88M.
 const FLOPPY_SIZES: [u64; 5] = [368_640, 737_280, 1_228_800, 1_474_560, 2_949_120];
 
+pub fn is_floppy_size(len: u64) -> bool {
+    FLOPPY_SIZES.contains(&len)
+}
+
 pub fn is_floppy_image(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && FLOPPY_SIZES.contains(&meta.len()))
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && is_floppy_size(meta.len()))
 }
 
 /// File names of the floppy images in `dir`, sorted, for the disk picker.
