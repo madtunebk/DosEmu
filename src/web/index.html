@@ -77,9 +77,15 @@ function connect() {
   ws.onopen = () => setStatus("connected", "ok");
   ws.onmessage = (event) => {
     const url = URL.createObjectURL(event.data);
-    screen.onload = () => { if (lastUrl) URL.revokeObjectURL(lastUrl); lastUrl = url; };
+    // Ask for the next frame only once this one is shown, so frames never queue up (that is lag).
+    screen.onload = () => {
+      if (lastUrl) URL.revokeObjectURL(lastUrl);
+      lastUrl = url;
+      frames++;
+      send({ type: "frame" });
+    };
+    screen.onerror = () => { URL.revokeObjectURL(url); send({ type: "frame" }); };
     screen.src = url;
-    frames++;
   };
   ws.onclose = () => { setStatus("disconnected — retrying", "bad"); setTimeout(connect, 1000); };
 }
