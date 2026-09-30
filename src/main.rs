@@ -20,14 +20,26 @@ const DEFAULT_WEB_ADDR: &str = "127.0.0.1:3000";
 const DEFAULT_DISK_DIR: &str = "images";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args().skip(1).map(PathBuf::from);
-    let image = args.next().unwrap_or_else(|| PathBuf::from("images/FD14FULL.img"));
+    // Usage: doslab [boot image] [extra hard disk] [cd.iso]. An .iso anywhere goes in the CD
+    // drive; with only an .iso the VM boots from the CD.
+    let (isos, disks): (Vec<PathBuf>, Vec<PathBuf>) = std::env::args()
+        .skip(1)
+        .map(PathBuf::from)
+        .partition(|path| session::is_iso_name(&path.to_string_lossy()));
+    let cdrom = isos.into_iter().next();
+    let mut disks = disks.into_iter();
+    let image = match (disks.next(), &cdrom) {
+        (Some(image), _) => Some(image),
+        (None, Some(_)) => None,
+        (None, None) => Some(PathBuf::from("images/FD14FULL.img")),
+    };
     // Optional raw hard disk image created by the user, e.g. `qemu-img create -f raw c.img 500M`.
-    let extra_disk = args.next();
+    let extra_disk = disks.next();
 
-    println!("Starting DOS VM with image: {}", image.display());
+    let boot = image.as_ref().or(cdrom.as_ref()).map(|path| path.display().to_string()).unwrap_or_default();
+    println!("Starting DOS VM from: {boot}");
 
-    let mut machine = session::Machine::start(&image, extra_disk.as_deref())?;
+    let mut machine = session::Machine::start(image.as_deref(), extra_disk.as_deref(), cdrom.as_deref())?;
     println!("QMP socket ready at: {}", machine.qmp_socket.display());
 
     let mut qmp = session::QmpClient::connect(&machine.bridge_socket)?;
@@ -55,7 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("DOS booting. Debug viewer: python3 scripts/viewer.py");
     println!("Console: a line is typed + Enter; ':esc', ':down down ret', ':ctrl+alt+delete' tap keys;");
     println!("         '!shot [file.ppm]' saves the current frame, '!stats' shows capture stats,");
-    println!("         '!disk <image>' swaps the floppy in A: (name in {}/ or a path), '!eject' empties it.", disk_dir.display());
+    println!("         '!disk <image>' swaps the floppy in A: (name in {}/ or a path), '!eject' empties it,", disk_dir.display());
+    println!("         '!cd <image.iso>' inserts a CD, '!eject cd' empties the CD drive.");
 
     // Debug console runs beside the VM; the process ends when QEMU exits.
     let bridge = Bridge { capture, qmp, disk_dir };
@@ -129,23 +142,32 @@ fn run_bridge_command(bridge: &Bridge, command: &str) -> Result<(), Box<dyn Erro
                 fb.width, fb.height, capture.source, fb.frame_number, updates as f64 / secs, fb.dirty
             );
         }
-        Some("disk") => {
+        Some(kind @ ("disk" | "cd")) => {
+            let (drive, list) = if kind == "cd" {
+                (session::Drive::Cdrom, session::list_isos(&bridge.disk_dir))
+            } else {
+                (session::Drive::Floppy, session::list_floppies(&bridge.disk_dir))
+            };
             let Some(name) = args.next() else {
-                let names = session::list_floppies(&bridge.disk_dir);
-                println!("floppies in {}: {}", bridge.disk_dir.display(), names.join(" "));
+                println!("{} images in {}: {}", drive.label(), bridge.disk_dir.display(), list.join(" "));
                 return Ok(());
             };
             let in_dir = bridge.disk_dir.join(name);
             let path = if in_dir.is_file() { in_dir } else { PathBuf::from(name) };
             let path = path.canonicalize().map_err(|err| format!("{name}: {err}"))?;
-            bridge.qmp.lock().unwrap().change_floppy(&path)?;
-            println!("A: now holds {}", path.display());
+            bridge.qmp.lock().unwrap().change_medium(drive, &path)?;
+            println!("{} now holds {}", drive.label(), path.display());
         }
         Some("eject") => {
-            bridge.qmp.lock().unwrap().eject_floppy()?;
-            println!("A: is empty");
+            let drive = match args.next() {
+                None | Some("a" | "a:" | "A:") => session::Drive::Floppy,
+                Some("cd") => session::Drive::Cdrom,
+                Some(other) => return Err(format!("eject what? '{other}' (try !eject or !eject cd)").into()),
+            };
+            bridge.qmp.lock().unwrap().eject(drive)?;
+            println!("{} is empty", drive.label());
         }
-        _ => return Err(format!("unknown command '!{command}' (try !shot, !stats, !disk, !eject)").into()),
+        _ => return Err(format!("unknown command '!{command}' (try !shot, !stats, !disk, !cd, !eject)").into()),
     }
     Ok(())
 }

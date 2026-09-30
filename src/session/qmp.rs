@@ -10,8 +10,31 @@ use std::time::{Duration, Instant};
 /// One QMP connection shared by the input and video threads; lock per command.
 pub type SharedQmp = Arc<Mutex<QmpClient>>;
 
-/// Block backend QEMU names the `-drive if=floppy,index=0` drive.
-const FLOPPY_DEVICE: &str = "floppy0";
+/// Drives whose medium can be swapped while the VM runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Drive {
+    /// Drive A:, `-drive if=floppy,index=0`.
+    Floppy,
+    /// The CD drive, `-drive if=ide,index=2,media=cdrom` (secondary IDE master).
+    Cdrom,
+}
+
+impl Drive {
+    /// Block backend name QEMU gives the drive.
+    fn device(self) -> &'static str {
+        match self {
+            Drive::Floppy => "floppy0",
+            Drive::Cdrom => "ide1-cd0",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Drive::Floppy => "A:",
+            Drive::Cdrom => "CD",
+        }
+    }
+}
 
 pub struct QmpClient {
     stream: UnixStream,
@@ -95,15 +118,15 @@ impl QmpClient {
         Ok(status.to_string())
     }
 
-    /// Swap the disk in drive A:, like changing install floppies on real hardware.
-    pub fn change_floppy(&mut self, image: &std::path::Path) -> Result<(), Box<dyn Error>> {
-        let args = json!({ "device": FLOPPY_DEVICE, "filename": image.display().to_string(), "format": "raw" });
+    /// Swap the medium in a removable drive, like changing disks on real hardware.
+    pub fn change_medium(&mut self, drive: Drive, image: &Path) -> Result<(), Box<dyn Error>> {
+        let args = json!({ "device": drive.device(), "filename": image.display().to_string(), "format": "raw" });
         self.execute("blockdev-change-medium", Some(args))?;
         Ok(())
     }
 
-    pub fn eject_floppy(&mut self) -> Result<(), Box<dyn Error>> {
-        self.execute("eject", Some(json!({ "device": FLOPPY_DEVICE, "force": true })))?;
+    pub fn eject(&mut self, drive: Drive) -> Result<(), Box<dyn Error>> {
+        self.execute("eject", Some(json!({ "device": drive.device(), "force": true })))?;
         Ok(())
     }
 }
