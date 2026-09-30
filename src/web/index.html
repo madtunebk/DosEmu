@@ -5,49 +5,194 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Coaba DOS Lab</title>
 <style>
-  :root { color-scheme: dark; }
-  html, body { margin: 0; height: 100%; background: #111; color: #9a9a9a;
-               font: 13px/1.4 ui-monospace, "DejaVu Sans Mono", monospace; }
-  body { display: flex; flex-direction: column; }
-  #screen-wrap { flex: 1; display: flex; align-items: center; justify-content: center;
-                 min-height: 0; padding: 12px; }
-  /* Fill the space and keep the guest's aspect ratio (it changes with the video mode). */
-  #screen { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; background: #000; }
-  #screen-wrap { outline: 2px solid transparent; outline-offset: -2px; }
-  body.focused #screen-wrap { outline-color: #2a6; }
-  #bar { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; padding: 6px 12px; background: #1a1a1a; }
-  #bar > * { white-space: nowrap; }
-  .drive { display: inline-flex; gap: 6px; align-items: center; }
-  #status.ok { color: #2d6; } #status.bad { color: #f55; }
-  #bar button, #bar select { font: inherit; background: #262626; color: #ccc; border: 1px solid #333;
-                padding: 2px 10px; cursor: pointer; }
+  :root {
+    color-scheme: dark;
+    --bg: #0c0d11;
+    --panel: #15171d;
+    --panel-2: #1c1f27;
+    --line: #2a2e38;
+    --text: #d6d3c9;
+    --muted: #8a8778;
+    --amber: #ffb000;
+    --amber-dim: #a8740a;
+    --green: #39e58c;
+    --red: #ff5a5a;
+    --radius: 10px;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", Menlo, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex; flex-direction: column;
+    background: radial-gradient(ellipse at 50% 0%, #1a1c25 0%, var(--bg) 60%) fixed;
+    color: var(--text); font: 13px/1.4 var(--sans);
+  }
+  button, select { font: inherit; color: inherit; }
+
+  /* ---- header ---- */
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+    padding: 10px 16px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(#171920, #121318);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font: 600 15px/1 var(--mono); letter-spacing: .5px; }
+  .brand .logo {
+    width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center;
+    background: var(--amber); color: #1a1200; font: 800 13px/1 var(--mono);
+    box-shadow: 0 0 14px rgba(255, 176, 0, .35);
+  }
+  .brand .name span { color: var(--amber); }
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px; padding: 4px 10px; border-radius: 999px;
+    background: var(--panel-2); border: 1px solid var(--line); font: 12px/1 var(--mono); color: var(--muted);
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pill.ok { color: var(--green); } .pill.ok .dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .pill.bad { color: var(--red); } .pill.bad .dot { background: var(--red); animation: blink 1s infinite; }
+  #fps { font: 12px/1 var(--mono); color: var(--muted); }
   .spacer { flex: 1; }
-  /* Drop a floppy image anywhere on the page to insert it in A:. */
-  body.dragging #screen-wrap { outline: 2px dashed #6af; }
-  #disk-msg.bad { color: #f55; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border-radius: 8px; cursor: pointer;
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--text); white-space: nowrap;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  .btn:hover { background: #242833; border-color: #3a4050; }
+  .btn:active { transform: translateY(1px); }
+  .btn[aria-pressed="true"] { border-color: var(--amber-dim); color: var(--amber); background: #231c0c; }
+  .btn.danger:hover { border-color: #6a2a2a; color: #ff8a8a; }
+  .btn:focus-visible, select:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+  /* ---- monitor ---- */
+  main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 14px; padding: 16px; }
+  .monitor {
+    position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column;
+    padding: 18px 18px 26px; border-radius: 18px;
+    background: linear-gradient(160deg, #2a2c33, #1a1b20 55%, #141519);
+    border: 1px solid #33363f; box-shadow: 0 20px 50px rgba(0, 0, 0, .55), inset 0 1px 0 rgba(255, 255, 255, .06);
+  }
+  .glass {
+    position: relative; flex: 1; min-height: 0; border-radius: 10px; overflow: hidden; background: #000;
+    box-shadow: inset 0 0 40px rgba(0, 0, 0, .9); outline: 2px solid transparent; outline-offset: 3px;
+    transition: outline-color .2s, box-shadow .2s;
+  }
+  body.focused .glass { outline-color: var(--amber); box-shadow: inset 0 0 40px rgba(0, 0, 0, .9), 0 0 28px rgba(255, 176, 0, .18); }
+  /* Fill the glass and keep the guest's aspect ratio (it changes with the video mode). */
+  #screen { display: block; width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; cursor: text; }
+  .scanlines::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, .28) 0 1px, transparent 1px 3px);
+    mix-blend-mode: multiply;
+  }
+  .hint, .veil {
+    position: absolute; left: 50%; transform: translateX(-50%); pointer-events: none;
+    font: 12px/1 var(--mono); color: var(--text); transition: opacity .25s;
+  }
+  .hint { bottom: 14px; white-space: nowrap; padding: 7px 12px; border-radius: 999px; background: rgba(12, 13, 17, .78); border: 1px solid var(--line); }
+  body.focused .hint { opacity: 0; }
+  .veil { inset: 0; left: 0; transform: none; display: grid; place-items: center; background: rgba(0, 0, 0, .55); opacity: 0; font-size: 14px; }
+  body.offline .veil { opacity: 1; }
+  .bezel-foot { position: absolute; left: 22px; right: 22px; bottom: 7px; display: flex; align-items: center; gap: 8px;
+                font: 10px/1 var(--mono); letter-spacing: 2px; color: #5c5f69; text-transform: uppercase; }
+  .led { width: 7px; height: 7px; border-radius: 50%; background: #3a2020; }
+  body.online .led { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .monitor:fullscreen { padding: 0; border-radius: 0; border: 0; }
+  .monitor:fullscreen .glass { border-radius: 0; }
+  .monitor:fullscreen .bezel-foot { display: none; }
+
+  /* ---- drive bay ---- */
+  .bay { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 12px; }
+  .drive {
+    position: relative; display: flex; align-items: center; gap: 12px; padding: 12px 14px; overflow: hidden;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  }
+  .drive .icon { font-size: 22px; filter: saturate(.8); }
+  .drive .meta { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 0; }
+  .drive .label { font: 600 11px/1 var(--mono); letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; }
+  .drive select {
+    width: 100%; padding: 6px 8px; border-radius: 7px; background: #0f1015; border: 1px solid var(--line);
+    font-family: var(--mono); cursor: pointer;
+  }
+  .drive .progress { position: absolute; left: 0; bottom: 0; height: 3px; width: 0; background: var(--amber); transition: width .15s; }
+  .bay .tip { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px; color: var(--muted);
+              border: 1px dashed var(--line); border-radius: var(--radius); font: 12px/1.4 var(--mono); text-align: center; }
+
+  /* ---- drag & drop, toasts ---- */
+  .dropzone {
+    position: fixed; inset: 12px; z-index: 10; display: grid; place-items: center; pointer-events: none; opacity: 0;
+    border: 2px dashed var(--amber); border-radius: 16px; background: rgba(12, 13, 17, .82); transition: opacity .15s;
+    font: 600 18px/1.6 var(--mono); color: var(--amber); text-align: center;
+  }
+  .dropzone small { display: block; font-weight: 400; font-size: 13px; color: var(--text); }
+  body.dragging .dropzone { opacity: 1; }
+  #toasts { position: fixed; right: 16px; bottom: 16px; z-index: 20; display: flex; flex-direction: column; gap: 8px; }
+  .toast {
+    max-width: 380px; padding: 10px 14px; border-radius: 9px; background: var(--panel-2); border: 1px solid var(--line);
+    border-left: 3px solid var(--green); box-shadow: 0 8px 24px rgba(0, 0, 0, .45); font: 12px/1.45 var(--mono);
+    animation: toast-in .2s ease-out;
+  }
+  .toast.bad { border-left-color: var(--red); }
+  .toast.info { border-left-color: var(--amber); }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
+  @keyframes blink { 50% { opacity: .3; } }
+  @media (max-width: 640px) { main { padding: 10px; } .monitor { padding: 10px 10px 22px; } header { padding: 8px 10px; } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
-<div id="screen-wrap"><canvas id="screen" width="720" height="400" aria-label="DOS screen"></canvas></div>
-<div id="bar">
-  <span id="status">connecting…</span>
+<header>
+  <div class="brand"><div class="logo">C:\</div><div class="name">Coaba <span>DOS</span> Lab</div></div>
+  <span id="status" class="pill"><span class="dot"></span><span class="text">connecting…</span></span>
   <span id="fps"></span>
   <span class="spacer"></span>
-  <span>click the screen to type</span>
-  <span class="drive">
-    <label title="Floppy in drive A:">A: <select id="disk"></select></label>
-    <button id="disk-insert">Insert</button>
-    <button id="disk-eject">Eject</button>
-  </span>
-  <span class="drive">
-    <label title="CD drive">CD: <select id="cd"></select></label>
-    <button id="cd-insert">Insert</button>
-    <button id="cd-eject">Eject</button>
-  </span>
-  <span id="disk-msg">drop a .img or .iso here</span>
-  <button id="sound" title="Play the DOS sound (Sound Blaster, AdLib, PC speaker) here">🔇 Sound</button>
-  <button id="cad" title="Ctrl+Alt+Delete">Ctrl+Alt+Del</button>
-</div>
+  <div class="actions">
+    <button class="btn" id="sound" aria-pressed="false" title="Play the DOS sound (Sound Blaster, AdLib, PC speaker)">🔇 Sound</button>
+    <button class="btn" id="shot" title="Save the screen as a PNG">📷 Screenshot</button>
+    <button class="btn" id="crt" aria-pressed="false" title="CRT scanlines">▤ CRT</button>
+    <button class="btn" id="full" title="Fullscreen (Esc to leave)">⛶ Fullscreen</button>
+    <button class="btn danger" id="cad" title="Send Ctrl+Alt+Delete (reboots DOS)">⟲ Ctrl+Alt+Del</button>
+  </div>
+</header>
+
+<main>
+  <div class="monitor" id="monitor">
+    <div class="glass" id="glass">
+      <canvas id="screen" width="720" height="400" aria-label="DOS screen"></canvas>
+      <div class="hint">⌨ click the screen to type</div>
+      <div class="veil">reconnecting…</div>
+    </div>
+    <div class="bezel-foot"><span class="led"></span><span>Coaba DOS Lab</span></div>
+  </div>
+
+  <section class="bay" aria-label="Drives">
+    <div class="drive" id="drive-disk">
+      <span class="icon">💾</span>
+      <div class="meta">
+        <span class="label">Drive A: · floppy</span>
+        <select id="disk" aria-label="Floppy image"></select>
+      </div>
+      <button class="btn" id="disk-insert">Insert</button>
+      <button class="btn" id="disk-eject">Eject</button>
+      <div class="progress"></div>
+    </div>
+    <div class="drive" id="drive-cd">
+      <span class="icon">💿</span>
+      <div class="meta">
+        <span class="label">CD-ROM</span>
+        <select id="cd" aria-label="CD image"></select>
+      </div>
+      <button class="btn" id="cd-insert">Insert</button>
+      <button class="btn" id="cd-eject">Eject</button>
+      <div class="progress"></div>
+    </div>
+    <div class="tip">⇪ drop a .img (floppy) or .iso (CD) anywhere to insert it</div>
+  </section>
+</main>
+
+<div class="dropzone"><div>Drop to insert<small>.img → drive A: · .iso → CD-ROM</small></div></div>
+<div id="toasts" aria-live="polite"></div>
+
 <script>
 // KeyboardEvent.code (physical key) -> QEMU qcode. Physical codes keep this layout-independent.
 const QCODES = {
@@ -73,14 +218,32 @@ function toQcode(code) {
   return null;
 }
 
-const screen = document.getElementById("screen");
-const status = document.getElementById("status");
-const fpsLabel = document.getElementById("fps");
+const $ = (id) => document.getElementById(id);
+const screen = $("screen");
+const status = $("status");
+const fpsLabel = $("fps");
 const ctx = screen.getContext("2d");
 let ws = null, focused = false, frames = 0;
 
 function send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
-function setStatus(text, cls) { status.textContent = text; status.className = cls; }
+function setStatus(text, cls) {
+  status.querySelector(".text").textContent = text;
+  status.className = `pill ${cls}`;
+  document.body.classList.toggle("online", cls === "ok");
+  document.body.classList.toggle("offline", cls === "bad");
+}
+function pref(key, value) {
+  try { if (value === undefined) return localStorage.getItem(key); localStorage.setItem(key, value); } catch {}
+  return null;
+}
+
+function toast(text, kind = "") {
+  const el = document.createElement("div");
+  el.className = `toast ${kind}`;
+  el.textContent = text;
+  $("toasts").append(el);
+  setTimeout(() => el.remove(), kind === "bad" ? 6000 : 3000);
+}
 
 function connect() {
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
@@ -110,12 +273,12 @@ function connect() {
     }
     send({ type: "frame" });
   };
-  ws.onclose = () => { setStatus("disconnected — retrying", "bad"); setTimeout(connect, 1000); };
+  ws.onclose = () => { setStatus("reconnecting…", "bad"); setTimeout(connect, 1000); };
 }
 
 setInterval(() => {
-  const sound = audioWs ? ` · sound: ${soundGaps} gaps, ${soundDrops} drops` : "";
-  fpsLabel.textContent = `${frames} frames/s${sound}`;
+  const sound = audioWs ? ` · 🔊 ${soundGaps} gaps, ${soundDrops} drops` : "";
+  fpsLabel.textContent = `${frames} fps · ${screen.width}×${screen.height}${sound}`;
   frames = 0;
 }, 1000);
 
@@ -158,46 +321,77 @@ function onKey(event, down) {
 document.addEventListener("keydown", (e) => onKey(e, true));
 document.addEventListener("keyup", (e) => onKey(e, false));
 
-document.getElementById("cad").addEventListener("click", () => {
+$("cad").addEventListener("click", () => {
   for (const code of ["ctrl", "alt", "delete"]) send({ type: "key", code, down: true });
   for (const code of ["delete", "alt", "ctrl"]) send({ type: "key", code, down: false });
+  toast("Ctrl+Alt+Del sent — DOS is rebooting", "info");
+});
+
+// Screenshot: the canvas already holds the exact guest pixels.
+$("shot").addEventListener("click", () => {
+  screen.toBlob((blob) => {
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+    a.href = URL.createObjectURL(blob);
+    a.download = `doslab-${stamp}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    toast(`Saved ${a.download}`);
+  }, "image/png");
+});
+
+// CRT scanlines, remembered per browser.
+function setCrt(on) {
+  $("glass").classList.toggle("scanlines", on);
+  $("crt").setAttribute("aria-pressed", String(on));
+  pref("doslab-crt", on ? "on" : "off");
+}
+$("crt").addEventListener("click", () => setCrt(!$("glass").classList.contains("scanlines")));
+setCrt(pref("doslab-crt") === "on");
+
+// Fullscreen keeps keyboard focus on the screen.
+$("full").addEventListener("click", async () => {
+  if (document.fullscreenElement) return document.exitFullscreen();
+  await $("monitor").requestFullscreen?.();
+  setFocus(true);
 });
 
 // Floppy and CD swapping (multi-disk installers, CD games): the lists come from the bridge's
 // disk directory. `kind` is the WebSocket message type and the upload path.
 const DRIVES = {
-  disk: { label: "A:", list: "/disks", select: document.getElementById("disk") },
-  cd: { label: "CD", list: "/cds", select: document.getElementById("cd") },
+  disk: { label: "A:", list: "/disks", select: $("disk"), card: $("drive-disk") },
+  cd: { label: "CD", list: "/cds", select: $("cd"), card: $("drive-cd") },
 };
 async function loadImages(kind) {
   const { list, select } = DRIVES[kind];
   try {
     const names = await (await fetch(list)).json();
     const current = select.value;
-    select.replaceChildren(...names.map((name) => new Option(name, name)));
+    select.replaceChildren(...(names.length ? names.map((name) => new Option(name, name)) : [new Option("— no images —", "")]));
     if (names.includes(current)) select.value = current;
   } catch (err) { console.warn(`${kind} list failed`, err); }
 }
-for (const [kind, { select }] of Object.entries(DRIVES)) {
+for (const [kind, { select, label }] of Object.entries(DRIVES)) {
   select.addEventListener("focus", () => loadImages(kind));
-  document.getElementById(`${kind}-insert`).addEventListener("click", () => {
-    if (select.value) send({ type: kind, name: select.value });
+  $(`${kind}-insert`).addEventListener("click", () => {
+    if (!select.value) return toast(`No ${label} image selected`, "bad");
+    send({ type: kind, name: select.value });
+    toast(`${label} now holds ${select.value}`);
   });
-  document.getElementById(`${kind}-eject`).addEventListener("click", () =>
-    send({ type: "eject", drive: kind === "cd" ? "cd" : "a" }));
+  $(`${kind}-eject`).addEventListener("click", () => {
+    send({ type: "eject", drive: kind === "cd" ? "cd" : "a" });
+    toast(`${label} ejected`, "info");
+  });
 }
-
-const diskMsg = document.getElementById("disk-msg");
-function setDiskMsg(text, bad) { diskMsg.textContent = text; diskMsg.className = bad ? "bad" : ""; }
 
 // XHR rather than fetch for upload progress: a CD image can be hundreds of MB.
 function uploadImage(kind, file) {
+  const bar = DRIVES[kind].card.querySelector(".progress");
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `/${kind === "cd" ? "cds" : "disks"}/${encodeURIComponent(file.name)}`);
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) setDiskMsg(`uploading ${file.name} ${Math.floor((100 * e.loaded) / e.total)}%`, false);
-    };
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) bar.style.width = `${(100 * e.loaded) / e.total}%`; };
+    xhr.onloadend = () => setTimeout(() => (bar.style.width = "0"), 400);
     xhr.onload = () => (xhr.status === 200 ? resolve(JSON.parse(xhr.responseText)) : reject(new Error(xhr.responseText)));
     xhr.onerror = () => reject(new Error(`uploading ${file.name} failed`));
     xhr.send(file);
@@ -215,31 +409,32 @@ document.addEventListener("drop", async (e) => {
   const file = e.dataTransfer.files[0];
   if (!file) return;
   const kind = file.name.toLowerCase().endsWith(".iso") ? "cd" : "disk";
-  setDiskMsg(`inserting ${file.name}…`, false);
+  toast(`Uploading ${file.name}…`, "info");
   try {
     // The server may save it under another name (floppy-2.img) if the name was taken.
     const { name } = await uploadImage(kind, file);
     await loadImages(kind);
     DRIVES[kind].select.value = name;
-    setDiskMsg(`${DRIVES[kind].label} ${name}`, false);
+    toast(`${DRIVES[kind].label} now holds ${name}`);
   } catch (err) {
-    setDiskMsg(String(err.message || err), true);
+    toast(String(err.message || err), "bad");
   }
 });
 
 // Sound: /audio sends 16-bit PCM chunks (u32 LE sample rate, u16 LE channels, u16 0, samples).
 // Chunks are queued back to back ~100 ms ahead of the clock. Never overlapping: a chunk that
 // arrives too late starts a new run (a "gap"), one that would play too far ahead is skipped
-// (a "drop"), so sound never lags behind the picture. Both are counted next to frames/s. Browsers only allow audio after a
-// click, so it starts from the button (or a click on the screen once it has been turned on).
-const soundButton = document.getElementById("sound");
+// (a "drop"), so sound never lags behind the picture. Both are counted in the header.
+// Browsers only allow audio after a click, so it starts from the button (or a click on the
+// screen once it has been turned on).
+const soundButton = $("sound");
 const SOUND_LEAD = 0.1, SOUND_MAX_LEAD = 0.35;
-let audioCtx = null, audioWs = null, soundWanted = false, nextPlay = 0, soundGaps = 0, soundDrops = 0;
-try { soundWanted = localStorage.getItem("doslab-sound") === "on"; } catch {}
+let audioCtx = null, audioWs = null, soundWanted = pref("doslab-sound") === "on", nextPlay = 0, soundGaps = 0, soundDrops = 0;
 
+function showSound(text, on) { soundButton.textContent = text; soundButton.setAttribute("aria-pressed", String(on)); }
 function setSound(on) {
   soundWanted = on;
-  try { localStorage.setItem("doslab-sound", on ? "on" : "off"); } catch {}
+  pref("doslab-sound", on ? "on" : "off");
   if (on) startSound(); else stopSound();
 }
 function startSound() {
@@ -249,18 +444,18 @@ function startSound() {
   let heard = false;
   audioWs = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/audio`);
   audioWs.binaryType = "arraybuffer";
-  audioWs.onopen = () => { soundButton.textContent = "🔊 Sound"; };
+  audioWs.onopen = () => showSound("🔊 Sound", true);
   audioWs.onmessage = (event) => { heard = true; playChunk(event.data); };
   audioWs.onclose = () => {
     audioWs = null;
     if (!soundWanted) return;
     // Closed before any sound: this QEMU exports none. Otherwise reconnect like the video.
-    if (!heard) soundButton.textContent = "🔇 no sound";
+    if (!heard) showSound("🔇 No sound", false);
     setTimeout(() => { if (soundWanted) startSound(); }, heard ? 1000 : 5000);
   };
 }
 function stopSound() {
-  soundButton.textContent = "🔇 Sound";
+  showSound("🔇 Sound", false);
   if (audioWs) { audioWs.onclose = null; audioWs.close(); audioWs = null; }
   audioCtx?.suspend();
 }
