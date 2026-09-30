@@ -15,7 +15,9 @@
   #screen { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; background: #000; }
   #screen-wrap { outline: 2px solid transparent; outline-offset: -2px; }
   body.focused #screen-wrap { outline-color: #2a6; }
-  #bar { display: flex; gap: 16px; align-items: center; padding: 6px 12px; background: #1a1a1a; }
+  #bar { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; padding: 6px 12px; background: #1a1a1a; }
+  #bar > * { white-space: nowrap; }
+  .drive { display: inline-flex; gap: 6px; align-items: center; }
   #status.ok { color: #2d6; } #status.bad { color: #f55; }
   #bar button, #bar select { font: inherit; background: #262626; color: #ccc; border: 1px solid #333;
                 padding: 2px 10px; cursor: pointer; }
@@ -32,12 +34,16 @@
   <span id="fps"></span>
   <span class="spacer"></span>
   <span>click the screen to type</span>
-  <label title="Floppy in drive A:">A: <select id="disk"></select></label>
-  <button id="disk-insert">Insert</button>
-  <button id="disk-eject">Eject</button>
-  <label title="CD drive">CD: <select id="cd"></select></label>
-  <button id="cd-insert">Insert</button>
-  <button id="cd-eject">Eject</button>
+  <span class="drive">
+    <label title="Floppy in drive A:">A: <select id="disk"></select></label>
+    <button id="disk-insert">Insert</button>
+    <button id="disk-eject">Eject</button>
+  </span>
+  <span class="drive">
+    <label title="CD drive">CD: <select id="cd"></select></label>
+    <button id="cd-insert">Insert</button>
+    <button id="cd-eject">Eject</button>
+  </span>
   <span id="disk-msg">drop a .img or .iso here</span>
   <button id="cad" title="Ctrl+Alt+Delete">Ctrl+Alt+Del</button>
 </div>
@@ -80,14 +86,16 @@ function connect() {
   ws.binaryType = "arraybuffer";
   ws.onopen = () => setStatus("connected", "ok");
   // Each message is the part of the screen that changed: u16 LE screen width, screen height,
-  // x, y, then that area as JPEG. The next one is requested only once this one is drawn,
+  // x, y, then that area as PNG or JPEG. The next one is requested only once this one is drawn,
   // so frames never queue up (that is lag).
   ws.onmessage = async (event) => {
     const header = new DataView(event.data, 0, 8);
     const [width, height, x, y] = [0, 2, 4, 6].map((offset) => header.getUint16(offset, true));
     try {
-      const jpeg = new Blob([new Uint8Array(event.data, 8)], { type: "image/jpeg" });
-      const bitmap = await createImageBitmap(jpeg);
+      const bytes = new Uint8Array(event.data, 8);
+      // Lossless PNG normally; JPEG only for areas with more than 256 colours.
+      const type = bytes[0] === 0x89 ? "image/png" : "image/jpeg";
+      const bitmap = await createImageBitmap(new Blob([bytes], { type }));
       // Resizing clears the canvas; a new size always arrives as a full frame.
       if (screen.width !== width || screen.height !== height) {
         screen.width = width;

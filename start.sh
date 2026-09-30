@@ -100,7 +100,8 @@ esac
 
 exec "${QEMU_BIN}" \
     -name "Coaba DOS Lab" \
-    -machine pc \
+    -audiodev none,id=snd0 \
+    -machine pc,pcspk-audiodev=snd0 \
     -accel tcg \
     -cpu 486 \
     -m 32M \

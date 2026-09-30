@@ -81,7 +81,11 @@ impl Machine {
         let qemu = |accel: &str| {
             let mut command = Command::new(&qemu_bin);
             command
-                .args(["-name", "Coaba DOS Lab", "-machine", "pc", "-accel", accel, "-cpu", "486", "-m", "32M"])
+                .args(["-name", "Coaba DOS Lab", "-accel", accel, "-cpu", "486", "-m", "32M"])
+                // No host audio: left to itself QEMU probes the host's sound system (PulseAudio,
+                // PipeWire, ALSA...) from inside our private D-Bus session, which crashed QEMU on
+                // the first beep. Sound is meant to reach the browser through the bridge instead.
+                .args(["-audiodev", "none,id=snd0", "-machine", "pc,pcspk-audiodev=snd0"])
                 .args(&drive)
                 .arg("-display")
                 .arg(format!("dbus,addr={qemu_dbus_address}"))
