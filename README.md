@@ -17,6 +17,17 @@ sudo apt install qemu-system-x86 dbus-daemon   # QEMU 8.2+ with the D-Bus displa
 
 and a Rust toolchain (`rustup`, edition 2024).
 
+## Getting DOS disk images
+
+Disk images aren't kept in this repository (`images/` is in `.gitignore`); bring your own:
+
+- **FreeDOS** (free): download the FreeDOS 1.4 *Floppy Edition* (1.44 MB disks) from
+  <https://www.freedos.org/download/>, unzip it and copy the boot disk and install disks
+  (`x86BOOT.img`, `x86DSK01.img` … `x86DSK06.img`) into `images/`.
+- **MS-DOS** or other DOS versions: use your own disk images the same way.
+
+Anything in `images/` (or `DOSLAB_DISK_DIR`) shows up in the page's A: and CD pickers.
+
 ## Run
 
 ```bash
