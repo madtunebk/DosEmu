@@ -1,5 +1,9 @@
+use std::collections::VecDeque;
 use std::error::Error;
 use std::path::Path;
+
+/// How many recent changes are remembered for viewers that fell a few frames behind.
+const CHANGE_LOG_LEN: usize = 64;
 
 /// Region of the screen that changed since the previous frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8,6 +12,16 @@ pub struct DirtyRect {
     pub y: u32,
     pub width: u32,
     pub height: u32,
+}
+
+impl DirtyRect {
+    /// Smallest rectangle covering both.
+    pub fn union(self, other: DirtyRect) -> DirtyRect {
+        let (x, y) = (self.x.min(other.x), self.y.min(other.y));
+        let right = (self.x + self.width).max(other.x + other.width);
+        let bottom = (self.y + self.height).max(other.y + other.height);
+        DirtyRect { x, y, width: right - x, height: bottom - y }
+    }
 }
 
 /// Latest guest screen as packed RGB24.
@@ -20,6 +34,10 @@ pub struct Framebuffer {
     pub frame_number: u64,
     /// Changed area of the latest frame; the whole screen on a resize.
     pub dirty: Option<DirtyRect>,
+    /// (frame_number, changed area) of the latest changes, oldest first.
+    recent: VecDeque<(u64, DirtyRect)>,
+    /// frame_number of the last size change; viewers from before it need a full frame.
+    resized_at: u64,
 }
 
 impl Framebuffer {
@@ -34,23 +52,62 @@ impl Framebuffer {
         } else {
             diff_bounds(width, &self.rgb, &rgb)
         };
-        if dirty.is_some() {
+        if let Some(rect) = dirty {
+            let resized = (width, height) != (self.width, self.height);
             self.width = width;
             self.height = height;
             self.rgb = rgb;
-            self.frame_number += 1;
-            self.dirty = dirty;
+            self.changed(rect, resized);
         }
         dirty
     }
 
     /// Take a whole new picture, as sent on a video mode change.
     pub fn scanout(&mut self, width: u32, height: u32, rgb: Vec<u8>) {
+        let resized = (width, height) != (self.width, self.height);
         self.width = width;
         self.height = height;
         self.rgb = rgb;
+        self.changed(DirtyRect { x: 0, y: 0, width, height }, resized);
+    }
+
+    fn changed(&mut self, rect: DirtyRect, resized: bool) {
         self.frame_number += 1;
-        self.dirty = Some(DirtyRect { x: 0, y: 0, width, height });
+        self.dirty = Some(rect);
+        if resized {
+            self.resized_at = self.frame_number;
+        }
+        if self.recent.len() == CHANGE_LOG_LEN {
+            self.recent.pop_front();
+        }
+        self.recent.push_back((self.frame_number, rect));
+    }
+
+    /// What a viewer that last saw frame `seen` must redraw: everything changed since then,
+    /// or the whole screen if the size changed or the log no longer reaches back that far.
+    pub fn changed_since(&self, seen: u64) -> DirtyRect {
+        let full = DirtyRect { x: 0, y: 0, width: self.width, height: self.height };
+        let log_covers = self.recent.front().is_some_and(|&(first, _)| first <= seen + 1);
+        if seen < self.resized_at || !log_covers {
+            return full;
+        }
+        self.recent
+            .iter()
+            .filter(|&&(number, _)| number > seen)
+            .map(|&(_, rect)| rect)
+            .reduce(DirtyRect::union)
+            .unwrap_or(full)
+    }
+
+    /// Packed RGB24 copy of one area of the picture.
+    pub fn crop(&self, rect: DirtyRect) -> Vec<u8> {
+        let (stride, row_len) = (self.width as usize * 3, rect.width as usize * 3);
+        let mut out = Vec::with_capacity(row_len * rect.height as usize);
+        for row in rect.y as usize..(rect.y + rect.height) as usize {
+            let start = row * stride + rect.x as usize * 3;
+            out.extend_from_slice(&self.rgb[start..start + row_len]);
+        }
+        out
     }
 
     /// Change the size, keeping the pixels that still fit and filling the rest with black.
@@ -84,8 +141,7 @@ impl Framebuffer {
             let start = (rect.y as usize + row) * stride + rect.x as usize * 3;
             self.rgb[start..start + row_len].copy_from_slice(src);
         }
-        self.frame_number += 1;
-        self.dirty = Some(rect);
+        self.changed(rect, false);
         true
     }
 
@@ -168,5 +224,21 @@ mod tests {
         assert!(!fb.patch(DirtyRect { x: 2, y: 1, width: 2, height: 1 }, &[9; 6]));
         assert!(fb.patch(DirtyRect { x: 2, y: 1, width: 1, height: 1 }, &[9; 3]));
         assert_eq!(&fb.rgb[15..], [9, 9, 9]);
+    }
+
+    #[test]
+    fn changed_since_merges_recent_changes() {
+        let mut fb = Framebuffer::new();
+        fb.scanout(4, 4, vec![0; 48]);
+        let seen = fb.frame_number;
+        assert!(fb.patch(DirtyRect { x: 0, y: 0, width: 1, height: 1 }, &[1; 3]));
+        assert!(fb.patch(DirtyRect { x: 2, y: 3, width: 1, height: 1 }, &[2; 3]));
+        assert_eq!(fb.changed_since(seen), DirtyRect { x: 0, y: 0, width: 3, height: 4 });
+        assert_eq!(fb.changed_since(fb.frame_number - 1), DirtyRect { x: 2, y: 3, width: 1, height: 1 });
+        assert_eq!(fb.crop(DirtyRect { x: 2, y: 3, width: 2, height: 1 }), [2, 2, 2, 0, 0, 0]);
+        // A new viewer (or one from before a resize) gets the whole screen.
+        assert_eq!(fb.changed_since(0), DirtyRect { x: 0, y: 0, width: 4, height: 4 });
+        fb.resize(5, 4);
+        assert_eq!(fb.changed_since(seen + 2), DirtyRect { x: 0, y: 0, width: 5, height: 4 });
     }
 }

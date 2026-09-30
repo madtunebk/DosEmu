@@ -137,7 +137,7 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Resp
     ws.on_upgrade(move |socket| client_session(socket, state))
 }
 
-/// Pushes JPEG frames as binary messages, one at a time; receives JSON text: `{"type":"frame"}`
+/// Pushes changed screen areas as binary messages (see VideoStream::next_message), one at a time; receives JSON text: `{"type":"frame"}`
 /// once a frame is shown,
 /// `{"type":"key","code":"<qcode>","down":true,"repeat":false}`, `{"type":"release_all"}`,
 /// `{"type":"disk","name":"<file in disk_dir>"}` or `{"type":"eject"}`.
@@ -157,8 +157,8 @@ async fn client_session(mut socket: WebSocket, state: AppState) {
                 if in_flight_since.is_some_and(|sent| sent.elapsed() < ACK_TIMEOUT) {
                     continue;
                 }
-                if let Some(jpeg) = video.next_jpeg().await {
-                    if socket.send(Message::Binary(jpeg.into())).await.is_err() {
+                if let Some(frame) = video.next_message().await {
+                    if socket.send(Message::Binary(frame.into())).await.is_err() {
                         break;
                     }
                     in_flight_since = Some(Instant::now());
