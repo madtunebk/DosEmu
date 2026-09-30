@@ -113,7 +113,11 @@ function connect() {
   ws.onclose = () => { setStatus("disconnected — retrying", "bad"); setTimeout(connect, 1000); };
 }
 
-setInterval(() => { fpsLabel.textContent = `${frames} frames/s`; frames = 0; }, 1000);
+setInterval(() => {
+  const sound = audioWs ? ` · sound: ${soundGaps} gaps, ${soundDrops} drops` : "";
+  fpsLabel.textContent = `${frames} frames/s${sound}`;
+  frames = 0;
+}, 1000);
 
 // Keys go to DOS only while the screen has focus, so the page stays usable otherwise.
 screen.addEventListener("mousedown", (e) => { e.preventDefault(); setFocus(true); });
@@ -224,12 +228,13 @@ document.addEventListener("drop", async (e) => {
 });
 
 // Sound: /audio sends 16-bit PCM chunks (u32 LE sample rate, u16 LE channels, u16 0, samples).
-// Chunks are queued back to back ~60 ms ahead of the clock; if playback drifts out of that
-// window it resyncs, so sound never lags behind the picture. Browsers only allow audio after a
+// Chunks are queued back to back ~100 ms ahead of the clock. Never overlapping: a chunk that
+// arrives too late starts a new run (a "gap"), one that would play too far ahead is skipped
+// (a "drop"), so sound never lags behind the picture. Both are counted next to frames/s. Browsers only allow audio after a
 // click, so it starts from the button (or a click on the screen once it has been turned on).
 const soundButton = document.getElementById("sound");
-const SOUND_LEAD = 0.06, SOUND_MAX_LEAD = 0.25;
-let audioCtx = null, audioWs = null, soundWanted = false, nextPlay = 0;
+const SOUND_LEAD = 0.1, SOUND_MAX_LEAD = 0.35;
+let audioCtx = null, audioWs = null, soundWanted = false, nextPlay = 0, soundGaps = 0, soundDrops = 0;
 try { soundWanted = localStorage.getItem("doslab-sound") === "on"; } catch {}
 
 function setSound(on) {
@@ -270,11 +275,18 @@ function playChunk(data) {
     const out = buffer.getChannelData(c);
     for (let i = 0; i < frames; i++) out[i] = samples[i * channels + c] / 32768;
   }
+  const now = audioCtx.currentTime;
+  if (nextPlay < now) {
+    // Ran dry. Right after sound was playing this is an audible gap; after silence it's normal.
+    if (now - nextPlay < 0.3) soundGaps++;
+    nextPlay = now + SOUND_LEAD;
+  } else if (nextPlay > now + SOUND_MAX_LEAD) {
+    soundDrops++;
+    return;
+  }
   const source = audioCtx.createBufferSource();
   source.buffer = buffer;
   source.connect(audioCtx.destination);
-  const now = audioCtx.currentTime;
-  if (nextPlay < now || nextPlay > now + SOUND_MAX_LEAD) nextPlay = now + SOUND_LEAD;
   source.start(nextPlay);
   nextPlay += buffer.duration;
 }
