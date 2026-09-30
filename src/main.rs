@@ -1,3 +1,4 @@
+mod audio;
 mod input;
 mod session;
 mod video;
@@ -59,10 +60,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     println!("Video: {}", capture.source);
+    let audio = if machine.dbus_audio {
+        audio::start(&machine.dbus_address)
+            .inspect_err(|err| eprintln!("audio: D-Bus audio listener failed ({err}); no sound in the browser"))
+            .ok()
+    } else {
+        None
+    };
+    println!("Audio: {}", if audio.is_some() { "dbus" } else { "none" });
     let disk_dir = PathBuf::from(std::env::var("DOSLAB_DISK_DIR").unwrap_or_else(|_| DEFAULT_DISK_DIR.to_string()));
 
     let web_addr = std::env::var("DOSLAB_WEB_ADDR").unwrap_or_else(|_| DEFAULT_WEB_ADDR.to_string());
-    web::spawn_server(web_addr, capture.framebuffer.clone(), input.clone(), qmp.clone(), disk_dir.clone());
+    web::spawn_server(web_addr, capture.framebuffer.clone(), input.clone(), qmp.clone(), disk_dir.clone(), audio);
 
     println!("DOS booting. Debug viewer: python3 scripts/viewer.py");
     println!("Console: a line is typed + Enter; ':esc', ':down down ret', ':ctrl+alt+delete' tap keys;");

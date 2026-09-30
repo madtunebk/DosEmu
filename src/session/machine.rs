@@ -15,6 +15,8 @@ pub struct Machine {
     pub bridge_socket: PathBuf,
     /// Private session bus QEMU's `-display dbus` backend is on.
     pub dbus_address: String,
+    /// Guest sound is exported over D-Bus (for crate::audio); false if this QEMU can't.
+    pub dbus_audio: bool,
 }
 
 impl Machine {
@@ -79,18 +81,25 @@ impl Machine {
             .to_string();
 
         let sound_cards = sound_card_args(&qemu_bin);
+        let dbus_audio = has_dbus_audio(&qemu_bin);
+        let (audio_backend, display) = if dbus_audio {
+            ("dbus,id=snd0", format!("dbus,addr={qemu_dbus_address},audiodev=snd0"))
+        } else {
+            eprintln!("sound: this QEMU has no D-Bus audio backend; the browser will get no sound");
+            ("none,id=snd0", format!("dbus,addr={qemu_dbus_address}"))
+        };
         let qemu = |accel: &str| {
             let mut command = Command::new(&qemu_bin);
             command
                 .args(["-name", "Coaba DOS Lab", "-accel", accel, "-cpu", "486", "-m", "32M"])
-                // No host audio: left to itself QEMU probes the host's sound system (PulseAudio,
+                // Never host audio: left to itself QEMU probes the host's sound system (PulseAudio,
                 // PipeWire, ALSA...) from inside our private D-Bus session, which crashed QEMU on
-                // the first beep. Sound is meant to reach the browser through the bridge instead.
-                .args(["-audiodev", "none,id=snd0", "-machine", "pc,pcspk-audiodev=snd0"])
+                // the first beep. Sound goes to the browser through the bridge instead.
+                .args(["-audiodev", audio_backend, "-machine", "pc,pcspk-audiodev=snd0"])
                 .args(&sound_cards)
                 .args(&drive)
                 .arg("-display")
-                .arg(format!("dbus,addr={qemu_dbus_address}"))
+                .arg(&display)
                 .arg("-qmp")
                 .arg(format!("unix:{},server=on,wait=off", qmp_socket.display()))
                 .arg("-qmp")
@@ -118,6 +127,7 @@ impl Machine {
             qmp_socket: qmp_socket.clone(),
             bridge_socket: bridge_socket.clone(),
             dbus_address: dbus_address.clone(),
+            dbus_audio,
         };
         for (attempt, accel) in accels.iter().enumerate() {
             if attempt > 0 {
@@ -175,7 +185,7 @@ impl Machine {
 /// Sound Blaster 16 (220h, IRQ 5, DMA 1/5) and AdLib (OPL2 FM at 388h), the cards DOS games
 /// expect. Without one, a game set up for Sound Blaster calls a driver that isn't there and
 /// jumps into the interrupt table (seen as a JemmEx "exception 06" at 0000:00xx). They play
-/// into the silent snd0 audiodev for now. Only devices this QEMU build has are added.
+/// into snd0, which the browser plays (see crate::audio). Only devices this QEMU build has are added.
 fn sound_card_args(qemu_bin: &str) -> Vec<String> {
     let available = Command::new(qemu_bin)
         .args(["-device", "help"])
@@ -191,6 +201,14 @@ fn sound_card_args(qemu_bin: &str) -> Vec<String> {
         }
     }
     args
+}
+
+/// Whether this QEMU can export sound over D-Bus (`-audiodev dbus`, the audio-dbus module).
+fn has_dbus_audio(qemu_bin: &str) -> bool {
+    Command::new(qemu_bin)
+        .args(["-audiodev", "help"])
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).lines().any(|line| line.trim() == "dbus"))
 }
 
 /// KVM runs DOS directly on the host CPU; TCG emulates every instruction and costs far more.
