@@ -2,6 +2,7 @@ use std::error::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use serde_bytes::ByteBuf;
 use zbus::export::futures_core::Stream;
 
 use super::framebuffer::DirtyRect;
@@ -90,9 +91,11 @@ impl Listener {
 }
 
 /// Method names and signatures follow QEMU's org.qemu.Display1.Listener (ui/dbus-display1.xml).
+/// Pixel data arrives as ByteBuf: zvariant decodes that in one copy, where Vec<u8> went byte by
+/// byte (~70% of the bridge's CPU while streaming a full-screen game).
 #[zbus::interface(name = "org.qemu.Display1.Listener")]
 impl Listener {
-    async fn scanout(&self, width: u32, height: u32, stride: u32, pixman_format: u32, data: Vec<u8>) {
+    async fn scanout(&self, width: u32, height: u32, stride: u32, pixman_format: u32, data: ByteBuf) {
         match to_rgb(pixman_format, stride, width, height, &data) {
             Ok(rgb) => {
                 self.framebuffer.lock().unwrap().scanout(width, height, rgb);
@@ -103,7 +106,7 @@ impl Listener {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn update(&self, x: i32, y: i32, width: i32, height: i32, stride: u32, pixman_format: u32, data: Vec<u8>) {
+    async fn update(&self, x: i32, y: i32, width: i32, height: i32, stride: u32, pixman_format: u32, data: ByteBuf) {
         let (Ok(x), Ok(y), Ok(width), Ok(height)) = (u32::try_from(x), u32::try_from(y), u32::try_from(width), u32::try_from(height)) else {
             return eprintln!("video: bad update rect {x},{y} {width}x{height}");
         };
@@ -136,7 +139,7 @@ impl Listener {
 
     async fn mouse_set(&self, _x: i32, _y: i32, _on: i32) {}
 
-    async fn cursor_define(&self, _width: i32, _height: i32, _hot_x: i32, _hot_y: i32, _data: Vec<u8>) {}
+    async fn cursor_define(&self, _width: i32, _height: i32, _hot_x: i32, _hot_y: i32, _data: ByteBuf) {}
 
     /// Optional extra interfaces (shared-memory Unix.Map, ...); none yet, so QEMU copies pixels.
     #[zbus(property)]

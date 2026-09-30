@@ -7,6 +7,7 @@ use std::error::Error;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use serde_bytes::ByteBuf;
 use tokio::sync::broadcast;
 
 use crate::session::dbus_listener;
@@ -107,13 +108,13 @@ impl OutListener {
         }
     }
 
-    async fn set_volume(&self, id: u64, mute: bool, _volume: Vec<u8>) {
+    async fn set_volume(&self, id: u64, mute: bool, _volume: ByteBuf) {
         if let Some(voice) = self.voices.lock().unwrap().get_mut(&id) {
             voice.muted = mute;
         }
     }
 
-    async fn write(&self, id: u64, data: Vec<u8>) {
+    async fn write(&self, id: u64, data: ByteBuf) {
         let format = match self.voices.lock().unwrap().get(&id) {
             Some(voice) if voice.enabled && !voice.muted => voice.format,
             _ => return,
