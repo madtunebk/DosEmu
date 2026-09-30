@@ -9,9 +9,11 @@ futures-util = { version = "0.3", default-features = false }
 jpeg-encoder = "0.7.1"
 png = "0.17"
 serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
 serde_json = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "fs", "io-util"] }
 zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }
+zvariant = { version = "5", features = ["serde_bytes"] }
 
 # Video handles ~30 full frames a second (D-Bus decoding, pixel conversion, JPEG), far too slow
 # unoptimized: a game's frames would queue up and lag seconds behind. Keep `cargo run` usable.
@@ -20,3 +22,6 @@ opt-level = 2
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.release]
+debug = "line-tables-only"
