@@ -160,9 +160,11 @@ document.addEventListener("drop", async (e) => {
   try {
     const res = await fetch(`/disks/${encodeURIComponent(file.name)}`, { method: "POST", body: file });
     if (!res.ok) throw new Error(await res.text());
+    // The server may save it under another name (floppy-2.img) if the name was taken.
+    const { name } = await res.json();
     await loadDisks();
-    diskSelect.value = file.name;
-    setDiskMsg(`A: ${file.name}`, false);
+    diskSelect.value = name;
+    setDiskMsg(`A: ${name}`, false);
   } catch (err) {
     setDiskMsg(String(err.message || err), true);
   }

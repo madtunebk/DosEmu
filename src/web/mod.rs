@@ -14,11 +14,14 @@ use crate::input::InputSender;
 use crate::session::{self, SharedQmp};
 use crate::video::{Framebuffer, VideoStream};
 
+/// How many `name-N.img` variants a dropped file may get before the drop is refused.
+const MAX_NAME_SUFFIX: u32 = 999;
+
 /// Largest floppy image (2.88M) plus headroom; axum's default body limit is 2 MB.
 const MAX_UPLOAD: usize = 3 * 1024 * 1024;
 
-/// How often each client checks for a new frame; capture itself runs at CAPTURE_FPS.
-const FRAME_CHECK: Duration = Duration::from_millis(50);
+/// How often each client checks for a new frame; QEMU pushes about 30 a second.
+const FRAME_CHECK: Duration = Duration::from_millis(33);
 
 #[derive(Clone)]
 struct AppState {
@@ -67,7 +70,8 @@ async fn disks(State(state): State<AppState>) -> Json<Value> {
 }
 
 /// Drag-and-drop target: saves a floppy image into disk_dir and inserts it in A:.
-/// Re-dropping an identical file reuses it; a different file never overwrites one.
+/// Re-dropping an identical file reuses it. A different file never overwrites one: it gets the
+/// next free name (floppy.img, floppy-2.img, ...), which is returned so the page can show it.
 async fn upload_disk(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -86,22 +90,32 @@ async fn upload_disk(
         )));
     }
 
-    let path = state.disk_dir.join(&name);
-    match tokio::fs::read(&path).await {
-        Ok(existing) if existing == body => {}
-        Ok(_) => {
-            return Err((
-                StatusCode::CONFLICT,
-                format!("{name} already exists in {} with different contents; rename the file", state.disk_dir.display()),
-            ));
+    let internal = |err: std::io::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("saving {name}: {err}"));
+    tokio::fs::create_dir_all(state.disk_dir.as_ref()).await.map_err(internal)?;
+    let (stem, ext) = name.rsplit_once('.').map_or((name.as_str(), ""), |(stem, ext)| (stem, ext));
+    let mut saved = None;
+    for n in 1..=MAX_NAME_SUFFIX {
+        let candidate = match (n, ext) {
+            (1, _) => name.clone(),
+            (_, "") => format!("{stem}-{n}"),
+            _ => format!("{stem}-{n}.{ext}"),
+        };
+        let path = state.disk_dir.join(&candidate);
+        match tokio::fs::read(&path).await {
+            Ok(existing) if existing == body => {}
+            Ok(_) => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                tokio::fs::write(&path, &body).await.map_err(internal)?;
+                println!("web: saved dropped disk {}", path.display());
+            }
+            Err(err) => return Err(internal(err)),
         }
-        Err(_) => {
-            let internal = |err: std::io::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("saving {name}: {err}"));
-            tokio::fs::create_dir_all(state.disk_dir.as_ref()).await.map_err(internal)?;
-            tokio::fs::write(&path, &body).await.map_err(internal)?;
-            println!("web: saved dropped disk {}", path.display());
-        }
+        saved = Some((candidate, path));
+        break;
     }
+    let Some((name, path)) = saved else {
+        return Err((StatusCode::CONFLICT, format!("too many different disks named like {name}; rename the file")));
+    };
 
     let qmp = state.qmp.clone();
     let insert_path = path.clone();
