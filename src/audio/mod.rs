@@ -13,6 +13,8 @@ use crate::session::dbus_listener;
 const AUDIO_PATH: &str = "/org/qemu/Display1/Audio";
 const AUDIO_INTERFACE: &str = "org.qemu.Display1.Audio";
 const LISTENER_PATH: &str = "/org/qemu/Display1/AudioOutListener";
+/// Peak below which a chunk counts as silence and isn't sent.
+const SILENCE: u16 = 512;
 /// Chunks buffered per client; a client further behind than this skips ahead (no growing lag).
 const CLIENT_BACKLOG: usize = 32;
 
@@ -118,8 +120,10 @@ impl OutListener {
         let Some(samples) = to_s16(format, &data) else {
             return eprintln!("audio: unsupported format {format:?}");
         };
-        // Silence is sent as nothing; the page simply plays nothing until sound arrives.
-        if samples.iter().all(|&sample| sample == 0) {
+        // Silence is sent as nothing; the page simply plays nothing until sound arrives. An idle
+        // Sound Blaster still outputs faint noise (peaks ~255 of 32767), which would otherwise
+        // cost 176 KB/s; below SILENCE (-36 dBFS) counts as silence.
+        if samples.iter().all(|&sample| sample.unsigned_abs() < SILENCE) {
             return;
         }
         let mut chunk = Vec::with_capacity(8 + samples.len() * 2);
