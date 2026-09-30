@@ -1,8 +1,10 @@
 use axum::Router;
-use axum::extract::State;
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::http::StatusCode;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::{Html, Json, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -11,6 +13,9 @@ use std::time::Duration;
 use crate::input::InputSender;
 use crate::session::{self, SharedQmp};
 use crate::video::{Framebuffer, VideoStream};
+
+/// Largest floppy image (2.88M) plus headroom; axum's default body limit is 2 MB.
+const MAX_UPLOAD: usize = 3 * 1024 * 1024;
 
 /// How often each client checks for a new frame; capture itself runs at CAPTURE_FPS.
 const FRAME_CHECK: Duration = Duration::from_millis(50);
@@ -39,6 +44,7 @@ pub fn spawn_server(
                 .route("/", get(index))
                 .route("/ws", get(ws_upgrade))
                 .route("/disks", get(disks))
+                .route("/disks/{name}", post(upload_disk).layer(DefaultBodyLimit::max(MAX_UPLOAD)))
                 .with_state(AppState { framebuffer, input, qmp, disk_dir: Arc::new(disk_dir) });
             let listener = match tokio::net::TcpListener::bind(&addr).await {
                 Ok(listener) => listener,
@@ -58,6 +64,54 @@ async fn index() -> Html<&'static str> {
 
 async fn disks(State(state): State<AppState>) -> Json<Value> {
     Json(json!(session::list_floppies(&state.disk_dir)))
+}
+
+/// Drag-and-drop target: saves a floppy image into disk_dir and inserts it in A:.
+/// Re-dropping an identical file reuses it; a different file never overwrites one.
+async fn upload_disk(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let bad_request = |message: String| (StatusCode::BAD_REQUEST, message);
+    let valid_name = !name.starts_with('.')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+    if !valid_name {
+        return Err(bad_request(format!("use a plain file name (letters, digits, . _ -): {name}")));
+    }
+    if !session::is_floppy_size(body.len() as u64) {
+        return Err(bad_request(format!(
+            "{name} is {} bytes, not a floppy image (360K, 720K, 1.2M, 1.44M or 2.88M)",
+            body.len()
+        )));
+    }
+
+    let path = state.disk_dir.join(&name);
+    match tokio::fs::read(&path).await {
+        Ok(existing) if existing == body => {}
+        Ok(_) => {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("{name} already exists in {} with different contents; rename the file", state.disk_dir.display()),
+            ));
+        }
+        Err(_) => {
+            let internal = |err: std::io::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("saving {name}: {err}"));
+            tokio::fs::create_dir_all(state.disk_dir.as_ref()).await.map_err(internal)?;
+            tokio::fs::write(&path, &body).await.map_err(internal)?;
+            println!("web: saved dropped disk {}", path.display());
+        }
+    }
+
+    let qmp = state.qmp.clone();
+    let insert_path = path.clone();
+    tokio::task::spawn_blocking(move || qmp.lock().unwrap().change_floppy(&insert_path).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| err.to_string())
+        .and_then(|result| result)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, format!("inserting {name}: {err}")))?;
+    println!("web: A: now holds {}", path.display());
+    Ok(Json(json!({ "name": name })))
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
