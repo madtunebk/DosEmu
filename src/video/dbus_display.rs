@@ -1,20 +1,16 @@
 use std::error::Error;
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use zbus::export::futures_core::Stream;
 
 use super::framebuffer::DirtyRect;
 use super::{Capture, Framebuffer};
+use crate::session::dbus_listener;
 
 const CONSOLE_PATH: &str = "/org/qemu/Display1/Console_0";
 const CONSOLE_INTERFACE: &str = "org.qemu.Display1.Console";
 const LISTENER_PATH: &str = "/org/qemu/Display1/Listener";
-/// QEMU claims its bus name while starting; give it a moment.
-const REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Receives the guest screen from QEMU's `-display dbus` backend: QEMU pushes a full
 /// `Scanout` on mode changes and an `Update` per changed rectangle, so nothing is polled.
@@ -22,39 +18,16 @@ pub fn start(dbus_address: &str) -> Result<Capture, Box<dyn Error>> {
     let capture = Capture::new("dbus");
     let (framebuffer, updates) = (capture.framebuffer.clone(), capture.updates.clone());
     let address = dbus_address.to_string();
-    let (ready_tx, ready_rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(runtime) => runtime,
-            Err(err) => return drop(ready_tx.send(Err(err.to_string()))),
-        };
-        runtime.block_on(async move {
-            match register(&address, framebuffer, updates).await {
-                Ok(connections) => {
-                    let _ = ready_tx.send(Ok(()));
-                    // The connections dispatch QEMU's calls while held; keep them for the VM's life.
-                    let _keep = connections;
-                    std::future::pending::<()>().await;
-                }
-                Err(err) => drop(ready_tx.send(Err(err.to_string()))),
-            }
-        });
-    });
-
-    match ready_rx.recv_timeout(REGISTER_TIMEOUT + Duration::from_secs(1)) {
-        Ok(Ok(())) => Ok(capture),
-        Ok(Err(err)) => Err(err.into()),
-        Err(_) => Err("timed out registering the D-Bus display listener".into()),
-    }
+    dbus_listener::run_on_own_thread("display", move || register(address, framebuffer, updates))?;
+    Ok(capture)
 }
 
 async fn register(
-    address: &str,
+    address: String,
     framebuffer: Arc<Mutex<Framebuffer>>,
     updates: Arc<AtomicU64>,
 ) -> zbus::Result<(zbus::Connection, zbus::Connection)> {
-    let bus = zbus::connection::Builder::address(address)?.build().await?;
+    let bus = zbus::connection::Builder::address(address.as_str())?.build().await?;
     let console = zbus::fdo::PropertiesProxy::builder(&bus)
         .destination("org.qemu")?
         .path(CONSOLE_PATH)?
@@ -62,44 +35,9 @@ async fn register(
         .build()
         .await?;
     let listener = Listener { framebuffer, updates, console };
-
-    // QEMU talks to listeners over a private peer-to-peer connection whose other end we hand it.
-    // It authenticates that socket inside RegisterListener, so the call and our side of the
-    // handshake must run together.
-    let (ours, theirs) = UnixStream::pair().map_err(zbus::Error::from)?;
-    ours.set_nonblocking(true).map_err(zbus::Error::from)?;
-    let ours = tokio::net::UnixStream::from_std(ours).map_err(zbus::Error::from)?;
-    let peer = zbus::connection::Builder::unix_stream(ours)
-        .p2p()
-        .serve_at(LISTENER_PATH, listener)?
-        .build();
-
-    let deadline = Instant::now() + REGISTER_TIMEOUT;
-    let call = async {
-        loop {
-            let result = bus
-                .call_method(
-                    Some("org.qemu"),
-                    CONSOLE_PATH,
-                    Some(CONSOLE_INTERFACE),
-                    "RegisterListener",
-                    &(zbus::zvariant::Fd::from(&theirs),),
-                )
-                .await;
-            match result {
-                // The name isn't on the bus until QEMU's display backend is up.
-                Err(zbus::Error::MethodError(name, ..))
-                    if name.as_str() == "org.freedesktop.DBus.Error.ServiceUnknown" && Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                other => return other.map(drop),
-            }
-        }
-    };
-    let (registered, peer) = tokio::join!(call, peer);
-    registered?;
-    let peer = peer?;
+    let peer =
+        dbus_listener::register_p2p(&bus, CONSOLE_PATH, CONSOLE_INTERFACE, "RegisterListener", LISTENER_PATH, listener)
+            .await?;
     tokio::spawn(watch_mode_changes(peer.clone()));
     Ok((bus, peer))
 }

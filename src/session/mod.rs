@@ -1,3 +1,4 @@
+pub mod dbus_listener;
 pub mod machine;
 pub mod qmp;
 
