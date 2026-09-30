@@ -123,18 +123,13 @@ impl Machine {
             if let Some(status) = self.child.try_wait()? {
                 return Err(format!("QEMU exited during startup: {status}").into());
             }
-            match std::os::unix::net::UnixStream::connect(socket_path) {
-                Ok(stream) => {
-                    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-                    let mut reader = std::io::BufReader::new(stream.try_clone()?);
-                    let mut line = String::new();
-                    match reader.read_line(&mut line) {
-                        Ok(_) if !line.trim().is_empty() => return Ok(()),
-                        Ok(_) => {}
-                        Err(_) => {}
-                    }
+            // Ready once QEMU greets a connection with its QMP banner.
+            if let Ok(stream) = std::os::unix::net::UnixStream::connect(socket_path) {
+                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                let mut line = String::new();
+                if std::io::BufReader::new(stream).read_line(&mut line).is_ok() && !line.trim().is_empty() {
+                    return Ok(());
                 }
-                Err(_) => {}
             }
 
             if start.elapsed() >= timeout {

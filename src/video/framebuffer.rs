@@ -134,22 +134,6 @@ impl Framebuffer {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{DirtyRect, Framebuffer};
-
-    #[test]
-    fn resize_keeps_overlap_and_patch_checks_bounds() {
-        let mut fb = Framebuffer::new();
-        fb.scanout(2, 1, vec![1, 1, 1, 2, 2, 2]);
-        assert!(fb.resize(3, 2));
-        assert_eq!(fb.rgb, [1, 1, 1, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        assert!(!fb.patch(DirtyRect { x: 2, y: 1, width: 2, height: 1 }, &[9; 6]));
-        assert!(fb.patch(DirtyRect { x: 2, y: 1, width: 1, height: 1 }, &[9; 3]));
-        assert_eq!(&fb.rgb[15..], [9, 9, 9]);
-    }
-}
-
 /// Bounding box of the pixels that differ between two same-sized RGB24 frames.
 fn diff_bounds(width: u32, old: &[u8], new: &[u8]) -> Option<DirtyRect> {
     let row_len = width as usize * 3;
@@ -169,4 +153,20 @@ fn diff_bounds(width: u32, old: &[u8], new: &[u8]) -> Option<DirtyRect> {
         y1 = y as u32;
     }
     (y0 != u32::MAX).then(|| DirtyRect { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DirtyRect, Framebuffer};
+
+    #[test]
+    fn resize_keeps_overlap_and_patch_checks_bounds() {
+        let mut fb = Framebuffer::new();
+        fb.scanout(2, 1, vec![1, 1, 1, 2, 2, 2]);
+        assert!(fb.resize(3, 2));
+        assert_eq!(fb.rgb, [1, 1, 1, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(!fb.patch(DirtyRect { x: 2, y: 1, width: 2, height: 1 }, &[9; 6]));
+        assert!(fb.patch(DirtyRect { x: 2, y: 1, width: 1, height: 1 }, &[9; 3]));
+        assert_eq!(&fb.rgb[15..], [9, 9, 9]);
+    }
 }
