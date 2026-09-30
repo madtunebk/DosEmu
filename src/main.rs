@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 use input::{InputSender, KeyboardController};
 use video::Capture;
 
-/// Screendump polling rate, only used when the D-Bus display listener can't register.
+/// Screendump polling rate, used when the D-Bus display listener can't register
+/// or DOSLAB_VIDEO=screendump.
 const CAPTURE_FPS: u32 = 10;
 const DEFAULT_WEB_ADDR: &str = "127.0.0.1:3000";
 /// Where `!disk <name>` and the web disk picker look for floppy images.
@@ -34,11 +35,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("QEMU status: {}", qmp.query_status()?);
     let qmp = Arc::new(Mutex::new(qmp));
     let input = input::spawn_input_thread(KeyboardController::new(qmp.clone()));
-    let capture = match video::dbus_display::start(&machine.dbus_address) {
-        Ok(capture) => capture,
-        Err(err) => {
-            eprintln!("video: D-Bus display listener failed ({err}); polling screendump at {CAPTURE_FPS} fps");
-            video::capture::ScreendumpCapture::start(qmp.clone(), CAPTURE_FPS)
+    // DOSLAB_VIDEO=screendump forces the old polling, to compare when a picture looks wrong.
+    let capture = if std::env::var("DOSLAB_VIDEO").is_ok_and(|v| v == "screendump") {
+        video::capture::ScreendumpCapture::start(qmp.clone(), CAPTURE_FPS)
+    } else {
+        match video::dbus_display::start(&machine.dbus_address) {
+            Ok(capture) => capture,
+            Err(err) => {
+                eprintln!("video: D-Bus display listener failed ({err}); polling screendump at {CAPTURE_FPS} fps");
+                video::capture::ScreendumpCapture::start(qmp.clone(), CAPTURE_FPS)
+            }
         }
     };
     println!("Video: {}", capture.source);
