@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 /// One QMP connection shared by the input and video threads; lock per command.
 pub type SharedQmp = Arc<Mutex<QmpClient>>;
 
+/// Block backend QEMU names the `-drive if=floppy,index=0` drive.
+const FLOPPY_DEVICE: &str = "floppy0";
+
 pub struct QmpClient {
     stream: UnixStream,
     reader: BufReader<UnixStream>,
@@ -97,6 +100,18 @@ impl QmpClient {
             .and_then(Value::as_str)
             .ok_or("query-status returned no status field")?;
         Ok(status.to_string())
+    }
+
+    /// Swap the disk in drive A:, like changing install floppies on real hardware.
+    pub fn change_floppy(&mut self, image: &std::path::Path) -> Result<(), Box<dyn Error>> {
+        let args = json!({ "device": FLOPPY_DEVICE, "filename": image.display().to_string(), "format": "raw" });
+        self.execute("blockdev-change-medium", Some(args))?;
+        Ok(())
+    }
+
+    pub fn eject_floppy(&mut self) -> Result<(), Box<dyn Error>> {
+        self.execute("eject", Some(json!({ "device": FLOPPY_DEVICE, "force": true })))?;
+        Ok(())
     }
 
     pub fn hmp_send_key(&mut self, key: &str) -> Result<Value, Box<dyn Error>> {

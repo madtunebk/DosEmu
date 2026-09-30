@@ -15,43 +15,55 @@ use video::ScreendumpCapture;
 
 const CAPTURE_FPS: u32 = 10;
 const DEFAULT_WEB_ADDR: &str = "127.0.0.1:3000";
+/// Where `!disk <name>` and the web disk picker look for floppy images.
+const DEFAULT_DISK_DIR: &str = "images";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let image = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("images/FD14FULL.img"));
+    let mut args = std::env::args().skip(1).map(PathBuf::from);
+    let image = args.next().unwrap_or_else(|| PathBuf::from("images/FD14FULL.img"));
+    // Optional raw hard disk image created by the user, e.g. `qemu-img create -f raw c.img 500M`.
+    let extra_disk = args.next();
 
     println!("Starting DOS VM with image: {}", image.display());
 
-    let mut machine = session::Machine::start(&image)?;
+    let mut machine = session::Machine::start(&image, extra_disk.as_deref())?;
     println!("QMP socket ready at: {}", machine.qmp_socket.display());
 
     let mut qmp = session::QmpClient::connect(&machine.bridge_socket)?;
     println!("QEMU status: {}", qmp.query_status()?);
     let qmp = Arc::new(Mutex::new(qmp));
     let input = input::spawn_input_thread(KeyboardController::new(qmp.clone()));
-    let capture = ScreendumpCapture::start(qmp, CAPTURE_FPS);
+    let capture = ScreendumpCapture::start(qmp.clone(), CAPTURE_FPS);
+    let disk_dir = PathBuf::from(std::env::var("DOSLAB_DISK_DIR").unwrap_or_else(|_| DEFAULT_DISK_DIR.to_string()));
 
     let web_addr = std::env::var("DOSLAB_WEB_ADDR").unwrap_or_else(|_| DEFAULT_WEB_ADDR.to_string());
-    web::spawn_server(web_addr, capture.framebuffer.clone(), input.clone());
+    web::spawn_server(web_addr, capture.framebuffer.clone(), input.clone(), qmp.clone(), disk_dir.clone());
 
     println!("DOS booting. Debug viewer: python3 scripts/viewer.py");
     println!("Console: a line is typed + Enter; ':esc', ':down down ret', ':ctrl+alt+delete' tap keys;");
-    println!("         '!shot [file.ppm]' saves the current frame, '!stats' shows capture stats.");
+    println!("         '!shot [file.ppm]' saves the current frame, '!stats' shows capture stats,");
+    println!("         '!disk <image>' swaps the floppy in A: (name in {}/ or a path), '!eject' empties it.", disk_dir.display());
 
     // Debug console runs beside the VM; the process ends when QEMU exits.
-    std::thread::spawn(move || run_console(input, capture));
+    let bridge = Bridge { capture, qmp, disk_dir };
+    std::thread::spawn(move || run_console(input, bridge));
 
     machine.wait_for_exit()?;
     Ok(())
 }
 
-fn run_console(input: InputSender, capture: ScreendumpCapture) {
+/// What the `!` console commands act on.
+struct Bridge {
+    capture: ScreendumpCapture,
+    qmp: session::SharedQmp,
+    disk_dir: PathBuf,
+}
+
+fn run_console(input: InputSender, bridge: Bridge) {
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         if let Some(command) = line.strip_prefix('!') {
-            if let Err(err) = run_bridge_command(&capture, command) {
+            if let Err(err) = run_bridge_command(&bridge, command) {
                 eprintln!("error: {err}");
             }
             continue;
@@ -82,7 +94,8 @@ fn type_console_line(keyboard: &mut KeyboardController, line: &str) -> Result<()
     keyboard.tap("ret")
 }
 
-fn run_bridge_command(capture: &ScreendumpCapture, command: &str) -> Result<(), Box<dyn Error>> {
+fn run_bridge_command(bridge: &Bridge, command: &str) -> Result<(), Box<dyn Error>> {
+    let capture = &bridge.capture;
     let mut args = command.split_whitespace();
     match args.next() {
         Some("shot") => {
@@ -103,7 +116,23 @@ fn run_bridge_command(capture: &ScreendumpCapture, command: &str) -> Result<(), 
                 fb.width, fb.height, fb.frame_number, polls as f64 / secs, fb.dirty
             );
         }
-        _ => return Err(format!("unknown command '!{command}' (try !shot, !stats)").into()),
+        Some("disk") => {
+            let Some(name) = args.next() else {
+                let names = session::list_floppies(&bridge.disk_dir);
+                println!("floppies in {}: {}", bridge.disk_dir.display(), names.join(" "));
+                return Ok(());
+            };
+            let in_dir = bridge.disk_dir.join(name);
+            let path = if in_dir.is_file() { in_dir } else { PathBuf::from(name) };
+            let path = path.canonicalize().map_err(|err| format!("{name}: {err}"))?;
+            bridge.qmp.lock().unwrap().change_floppy(&path)?;
+            println!("A: now holds {}", path.display());
+        }
+        Some("eject") => {
+            bridge.qmp.lock().unwrap().eject_floppy()?;
+            println!("A: is empty");
+        }
+        _ => return Err(format!("unknown command '!{command}' (try !shot, !stats, !disk, !eject)").into()),
     }
     Ok(())
 }

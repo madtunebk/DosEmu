@@ -16,7 +16,7 @@ pub struct Machine {
 }
 
 impl Machine {
-    pub fn start(image_path: &Path) -> Result<Self, Box<dyn Error>> {
+    pub fn start(image_path: &Path, extra_disk: Option<&Path>) -> Result<Self, Box<dyn Error>> {
         let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
         let uid = std::env::var("UID").unwrap_or_else(|_| {
             let output = std::process::Command::new("id").arg("-u").output();
@@ -46,6 +46,8 @@ impl Machine {
 
         let image = image_path.canonicalize().unwrap_or_else(|_| image_path.to_path_buf());
         let qemu_bin = std::env::var("QEMU_BIN").unwrap_or_else(|_| "qemu-system-i386".to_string());
+        let extra_disk = extra_disk.map(|disk| disk.canonicalize().unwrap_or_else(|_| disk.to_path_buf()));
+        let drive = drive_args(&image, extra_disk.as_deref())?;
 
         // --nofork keeps the daemon as our child so we can kill it when QEMU exits.
         let mut dbus = Command::new("dbus-daemon")
@@ -82,10 +84,7 @@ impl Machine {
             .arg("486")
             .arg("-m")
             .arg("32M")
-            .arg("-drive")
-            .arg(format!("file={},format=raw,if=ide,index=0,media=disk", image.display()))
-            .arg("-boot")
-            .arg("c")
+            .args(&drive)
             .arg("-display")
             .arg(format!("dbus,addr={qemu_dbus_address}"))
             .arg("-qmp")
@@ -148,6 +147,58 @@ impl Machine {
         println!("QEMU exited with status: {status}");
         Ok(())
     }
+}
+
+/// Standard PC floppy image sizes: 360K, 720K, 1.2M, 1.44M, 2.88M.
+const FLOPPY_SIZES: [u64; 5] = [368_640, 737_280, 1_228_800, 1_474_560, 2_949_120];
+
+pub fn is_floppy_image(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && FLOPPY_SIZES.contains(&meta.len()))
+}
+
+/// File names of the floppy images in `dir`, sorted, for the disk picker.
+pub fn list_floppies(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|entry| is_floppy_image(&entry.path()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Floppy boot sectors print "Error!" when attached as a hard disk, so pick the
+/// bus from the image size. BOOT_MODE=hdd|floppy overrides, as in start.sh.
+/// `extra_disk` is a blank or existing raw hard disk (e.g. to install DOS onto):
+/// C: when booting a floppy, D: otherwise.
+fn drive_args(image: &Path, extra_disk: Option<&Path>) -> Result<Vec<String>, Box<dyn Error>> {
+    let mode = match std::env::var("BOOT_MODE") {
+        Ok(mode) => mode,
+        Err(_) => if is_floppy_image(image) { "floppy" } else { "hdd" }.to_string(),
+    };
+    let file = image.display();
+    let (drive, boot, disk_index) = match mode.as_str() {
+        "hdd" => (format!("file={file},format=raw,if=ide,index=0,media=disk"), "c", 1),
+        "floppy" => (format!("file={file},format=raw,if=floppy,index=0"), "a", 0),
+        other => return Err(format!("BOOT_MODE must be 'hdd' or 'floppy', got '{other}'").into()),
+    };
+    println!("Boot mode: {mode}");
+    let mut args = vec!["-drive".into(), drive, "-boot".into(), boot.into()];
+    if mode == "hdd" {
+        // Empty drive A: so floppies can be inserted later (`!disk`, web disk picker).
+        args.push("-drive".into());
+        args.push("if=floppy,index=0".into());
+    }
+    if let Some(disk) = extra_disk {
+        if !disk.is_file() {
+            return Err(format!("extra disk image not found: {}", disk.display()).into());
+        }
+        println!("Extra disk: {} (IDE index {disk_index})", disk.display());
+        args.push("-drive".into());
+        args.push(format!("file={},format=raw,if=ide,index={disk_index},media=disk", disk.display()));
+    }
+    Ok(args)
 }
 
 impl Drop for Machine {
