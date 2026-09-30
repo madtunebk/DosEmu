@@ -21,7 +21,7 @@ pub struct QmpClient {
 impl QmpClient {
     pub fn connect(socket_path: &Path) -> Result<Self, Box<dyn Error>> {
         let deadline = Instant::now() + Duration::from_secs(15);
-        let mut last_error = None;
+        let mut last_error: Box<dyn Error>;
 
         loop {
             match UnixStream::connect(socket_path) {
@@ -35,21 +35,14 @@ impl QmpClient {
                             client.execute("qmp_capabilities", None)?;
                             return Ok(client);
                         }
-                        Err(err) => {
-                            last_error = Some(err);
-                        }
+                        Err(err) => last_error = err,
                     }
                 }
-                Err(err) => {
-                    last_error = Some(Box::new(err));
-                }
+                Err(err) => last_error = Box::new(err),
             }
 
             if Instant::now() >= deadline {
-                let message = last_error
-                    .map(|err| err.to_string())
-                    .unwrap_or_else(|| format!("Timed out connecting to QMP socket at {}", socket_path.display()));
-                return Err(message.into());
+                return Err(format!("timed out connecting to QMP socket at {}: {last_error}", socket_path.display()).into());
             }
 
             thread::sleep(Duration::from_millis(200));
@@ -112,10 +105,5 @@ impl QmpClient {
     pub fn eject_floppy(&mut self) -> Result<(), Box<dyn Error>> {
         self.execute("eject", Some(json!({ "device": FLOPPY_DEVICE, "force": true })))?;
         Ok(())
-    }
-
-    pub fn hmp_send_key(&mut self, key: &str) -> Result<Value, Box<dyn Error>> {
-        let args = json!({ "command-line": format!("sendkey {key}") });
-        self.execute("human-monitor-command", Some(args))
     }
 }

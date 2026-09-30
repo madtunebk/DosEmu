@@ -75,33 +75,25 @@ impl Machine {
             .unwrap_or(&dbus_address)
             .to_string();
 
-        let child = Command::new(&qemu_bin)
-            .arg("-name")
-            .arg("Coaba DOS Lab")
-            .arg("-machine")
-            .arg("pc")
-            .arg("-accel")
-            .arg("tcg")
-            .arg("-cpu")
-            .arg("486")
-            .arg("-m")
-            .arg("32M")
-            .args(&drive)
-            .arg("-display")
-            .arg(format!("dbus,addr={qemu_dbus_address}"))
-            .arg("-qmp")
-            .arg(format!("unix:{},server=on,wait=off", qmp_socket.display()))
-            .arg("-qmp")
-            .arg(format!("unix:{},server=on,wait=off", bridge_socket.display()))
-            .arg("-nic")
-            .arg("none")
-            .arg("-rtc")
-            .arg("base=localtime")
-            .arg("-no-reboot")
-            .env("XDG_RUNTIME_DIR", &runtime_dir)
-            .env("DBUS_SESSION_BUS_ADDRESS", &dbus_address)
-            .spawn();
-        let child = match child {
+        let qemu = |accel: &str| {
+            let mut command = Command::new(&qemu_bin);
+            command
+                .args(["-name", "Coaba DOS Lab", "-machine", "pc", "-accel", accel, "-cpu", "486", "-m", "32M"])
+                .args(&drive)
+                .arg("-display")
+                .arg(format!("dbus,addr={qemu_dbus_address}"))
+                .arg("-qmp")
+                .arg(format!("unix:{},server=on,wait=off", qmp_socket.display()))
+                .arg("-qmp")
+                .arg(format!("unix:{},server=on,wait=off", bridge_socket.display()))
+                .args(["-nic", "none", "-rtc", "base=localtime", "-no-reboot"])
+                .env("XDG_RUNTIME_DIR", &runtime_dir)
+                .env("DBUS_SESSION_BUS_ADDRESS", &dbus_address);
+            command
+        };
+
+        let accels = accelerators();
+        let child = match qemu(accels[0]).spawn() {
             Ok(child) => child,
             Err(err) => {
                 let _ = dbus.kill();
@@ -111,9 +103,34 @@ impl Machine {
         };
 
         // Construct first so Drop cleans up both processes if the socket never appears.
-        let mut machine = Self { child, dbus, qmp_socket, bridge_socket, dbus_address };
-        machine.wait_until_socket_ready(Duration::from_secs(25))?;
-        Ok(machine)
+        let mut machine = Self {
+            child,
+            dbus,
+            qmp_socket: qmp_socket.clone(),
+            bridge_socket: bridge_socket.clone(),
+            dbus_address: dbus_address.clone(),
+        };
+        for (attempt, accel) in accels.iter().enumerate() {
+            if attempt > 0 {
+                let _ = machine.child.kill();
+                let _ = machine.child.wait();
+                for socket in [&qmp_socket, &bridge_socket] {
+                    let _ = std::fs::remove_file(socket);
+                }
+                machine.child = qemu(accel).spawn()?;
+            }
+            match machine.wait_until_socket_ready(Duration::from_secs(25)) {
+                Ok(()) => {
+                    println!("CPU accelerator: {accel}");
+                    return Ok(machine);
+                }
+                Err(err) if attempt + 1 < accels.len() => {
+                    eprintln!("QEMU did not start with {accel} ({err}); retrying with {}", accels[attempt + 1]);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        unreachable!("accelerators() is never empty")
     }
 
     fn wait_until_socket_ready(&mut self, timeout: Duration) -> Result<(), Box<dyn Error>> {
@@ -123,18 +140,13 @@ impl Machine {
             if let Some(status) = self.child.try_wait()? {
                 return Err(format!("QEMU exited during startup: {status}").into());
             }
-            match std::os::unix::net::UnixStream::connect(socket_path) {
-                Ok(stream) => {
-                    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-                    let mut reader = std::io::BufReader::new(stream.try_clone()?);
-                    let mut line = String::new();
-                    match reader.read_line(&mut line) {
-                        Ok(_) if !line.trim().is_empty() => return Ok(()),
-                        Ok(_) => {}
-                        Err(_) => {}
-                    }
+            // Ready once QEMU greets a connection with its QMP banner.
+            if let Ok(stream) = std::os::unix::net::UnixStream::connect(socket_path) {
+                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                let mut line = String::new();
+                if std::io::BufReader::new(stream).read_line(&mut line).is_ok() && !line.trim().is_empty() {
+                    return Ok(());
                 }
-                Err(_) => {}
             }
 
             if start.elapsed() >= timeout {
@@ -148,6 +160,20 @@ impl Machine {
         let status = self.child.wait()?;
         println!("QEMU exited with status: {status}");
         Ok(())
+    }
+}
+
+/// KVM runs DOS directly on the host CPU; TCG emulates every instruction and costs far more.
+/// Auto mode tries KVM when /dev/kvm is usable and falls back to TCG. DOSLAB_ACCEL=kvm|tcg
+/// forces one, e.g. tcg for old games that run too fast at full hardware speed.
+fn accelerators() -> Vec<&'static str> {
+    match std::env::var("DOSLAB_ACCEL").as_deref() {
+        Ok("kvm") => vec!["kvm"],
+        Ok("tcg") => vec!["tcg"],
+        _ => {
+            let kvm_usable = std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_ok();
+            if kvm_usable { vec!["kvm", "tcg"] } else { vec!["tcg"] }
+        }
     }
 }
 
