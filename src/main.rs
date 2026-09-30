@@ -11,8 +11,9 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use input::{InputSender, KeyboardController};
-use video::ScreendumpCapture;
+use video::Capture;
 
+/// Screendump polling rate, only used when the D-Bus display listener can't register.
 const CAPTURE_FPS: u32 = 10;
 const DEFAULT_WEB_ADDR: &str = "127.0.0.1:3000";
 /// Where `!disk <name>` and the web disk picker look for floppy images.
@@ -33,7 +34,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("QEMU status: {}", qmp.query_status()?);
     let qmp = Arc::new(Mutex::new(qmp));
     let input = input::spawn_input_thread(KeyboardController::new(qmp.clone()));
-    let capture = ScreendumpCapture::start(qmp.clone(), CAPTURE_FPS);
+    let capture = match video::dbus_display::start(&machine.dbus_address) {
+        Ok(capture) => capture,
+        Err(err) => {
+            eprintln!("video: D-Bus display listener failed ({err}); polling screendump at {CAPTURE_FPS} fps");
+            video::capture::ScreendumpCapture::start(qmp.clone(), CAPTURE_FPS)
+        }
+    };
+    println!("Video: {}", capture.source);
     let disk_dir = PathBuf::from(std::env::var("DOSLAB_DISK_DIR").unwrap_or_else(|_| DEFAULT_DISK_DIR.to_string()));
 
     let web_addr = std::env::var("DOSLAB_WEB_ADDR").unwrap_or_else(|_| DEFAULT_WEB_ADDR.to_string());
@@ -54,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// What the `!` console commands act on.
 struct Bridge {
-    capture: ScreendumpCapture,
+    capture: Capture,
     qmp: session::SharedQmp,
     disk_dir: PathBuf,
 }
@@ -109,11 +117,11 @@ fn run_bridge_command(bridge: &Bridge, command: &str) -> Result<(), Box<dyn Erro
         }
         Some("stats") => {
             let fb = capture.framebuffer.lock().unwrap();
-            let polls = capture.polls.load(Ordering::Relaxed);
+            let updates = capture.updates.load(Ordering::Relaxed);
             let secs = capture.started.elapsed().as_secs_f64();
             println!(
-                "{}x{}, {} changed frames, {polls} polls ({:.1}/s), last dirty: {:?}",
-                fb.width, fb.height, fb.frame_number, polls as f64 / secs, fb.dirty
+                "{}x{} via {}, {} changed frames, {updates} updates ({:.1}/s), last dirty: {:?}",
+                fb.width, fb.height, capture.source, fb.frame_number, updates as f64 / secs, fb.dirty
             );
         }
         Some("disk") => {

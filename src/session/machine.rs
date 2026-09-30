@@ -13,6 +13,8 @@ pub struct Machine {
     pub qmp_socket: PathBuf,
     /// Kept open by the Rust bridge; QMP serves one client per socket.
     pub bridge_socket: PathBuf,
+    /// Private session bus QEMU's `-display dbus` backend is on.
+    pub dbus_address: String,
 }
 
 impl Machine {
@@ -109,7 +111,7 @@ impl Machine {
         };
 
         // Construct first so Drop cleans up both processes if the socket never appears.
-        let mut machine = Self { child, dbus, qmp_socket, bridge_socket };
+        let mut machine = Self { child, dbus, qmp_socket, bridge_socket, dbus_address };
         machine.wait_until_socket_ready(Duration::from_secs(25))?;
         Ok(machine)
     }

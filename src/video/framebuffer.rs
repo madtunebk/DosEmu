@@ -44,6 +44,51 @@ impl Framebuffer {
         dirty
     }
 
+    /// Take a whole new picture, as sent on a video mode change.
+    pub fn scanout(&mut self, width: u32, height: u32, rgb: Vec<u8>) {
+        self.width = width;
+        self.height = height;
+        self.rgb = rgb;
+        self.frame_number += 1;
+        self.dirty = Some(DirtyRect { x: 0, y: 0, width, height });
+    }
+
+    /// Change the size, keeping the pixels that still fit and filling the rest with black.
+    /// False if the size is unchanged.
+    pub fn resize(&mut self, width: u32, height: u32) -> bool {
+        if (width, height) == (self.width, self.height) {
+            return false;
+        }
+        let mut rgb = vec![0; width as usize * height as usize * 3];
+        let keep = self.width.min(width) as usize * 3;
+        if keep > 0 {
+            let (old_stride, new_stride) = (self.width as usize * 3, width as usize * 3);
+            for (old_row, new_row) in self.rgb.chunks_exact(old_stride).zip(rgb.chunks_exact_mut(new_stride)) {
+                new_row[..keep].copy_from_slice(&old_row[..keep]);
+            }
+        }
+        self.scanout(width, height, rgb);
+        true
+    }
+
+    /// Copy a packed RGB24 rectangle into the picture. False if it doesn't fit.
+    pub fn patch(&mut self, rect: DirtyRect, rgb: &[u8]) -> bool {
+        let fits = rect.x.checked_add(rect.width).is_some_and(|right| right <= self.width)
+            && rect.y.checked_add(rect.height).is_some_and(|bottom| bottom <= self.height)
+            && rgb.len() == rect.width as usize * rect.height as usize * 3;
+        if !fits {
+            return false;
+        }
+        let (row_len, stride) = (rect.width as usize * 3, self.width as usize * 3);
+        for (row, src) in rgb.chunks_exact(row_len).enumerate() {
+            let start = (rect.y as usize + row) * stride + rect.x as usize * 3;
+            self.rgb[start..start + row_len].copy_from_slice(src);
+        }
+        self.frame_number += 1;
+        self.dirty = Some(rect);
+        true
+    }
+
     /// Parse a binary PPM (P6, maxval 255) as written by QEMU's `screendump`.
     pub fn parse_ppm(data: &[u8]) -> Result<(u32, u32, Vec<u8>), Box<dyn Error>> {
         let mut pos = 0;
@@ -86,6 +131,22 @@ impl Framebuffer {
         out.extend_from_slice(&self.rgb);
         std::fs::write(path, out)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DirtyRect, Framebuffer};
+
+    #[test]
+    fn resize_keeps_overlap_and_patch_checks_bounds() {
+        let mut fb = Framebuffer::new();
+        fb.scanout(2, 1, vec![1, 1, 1, 2, 2, 2]);
+        assert!(fb.resize(3, 2));
+        assert_eq!(fb.rgb, [1, 1, 1, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(!fb.patch(DirtyRect { x: 2, y: 1, width: 2, height: 1 }, &[9; 6]));
+        assert!(fb.patch(DirtyRect { x: 2, y: 1, width: 1, height: 1 }, &[9; 3]));
+        assert_eq!(&fb.rgb[15..], [9, 9, 9]);
     }
 }
 
