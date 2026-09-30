@@ -31,6 +31,8 @@ static UPLOAD_ID: AtomicU64 = AtomicU64::new(0);
 /// How often each client checks for a new frame; QEMU pushes about 30 a second. Checking
 /// faster than that shortens the wait after an ack; unchanged frames cost nothing.
 const FRAME_CHECK: Duration = Duration::from_millis(10);
+/// Largest mouse step accepted per message (guest pixels), against runaway values.
+const MAX_MOUSE_STEP: i64 = 2000;
 /// Sent by the page once a frame is on screen.
 const FRAME_ACK: &str = r#"{"type":"frame"}"#;
 /// Send anyway if a frame goes unacknowledged this long.
@@ -252,6 +254,7 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Resp
 /// Pushes changed screen areas as binary messages (see VideoStream::next_message), one at a time; receives JSON text: `{"type":"frame"}`
 /// once a frame is shown,
 /// `{"type":"key","code":"<qcode>","down":true,"repeat":false}`, `{"type":"release_all"}`,
+/// `{"type":"mouse","dx":0,"dy":0,"button":"left"?,"down":true?}`,
 /// `{"type":"disk"|"cd","name":"<file in disk_dir>"}` or `{"type":"eject","drive":"cd"?}`.
 async fn client_session(mut socket: WebSocket, state: AppState) {
     let mut video = VideoStream::new(state.framebuffer.clone());
@@ -314,6 +317,22 @@ fn handle_client_message(state: &AppState, text: &str) {
         }
         Some("release_all") => {
             let _ = input.send(Box::new(|keyboard| keyboard.release_all()));
+        }
+        Some("mouse") => {
+            // Movement (dx, dy in guest pixels) and/or a button change, in one message.
+            let dx = message["dx"].as_i64().unwrap_or(0).clamp(-MAX_MOUSE_STEP, MAX_MOUSE_STEP);
+            let dy = message["dy"].as_i64().unwrap_or(0).clamp(-MAX_MOUSE_STEP, MAX_MOUSE_STEP);
+            let button = message["button"].as_str().map(str::to_string);
+            let down = message["down"].as_bool().unwrap_or(false);
+            let _ = input.send(Box::new(move |keyboard| {
+                let mut result = keyboard.mouse_move(dx, dy);
+                if let (Ok(()), Some(button)) = (&result, &button) {
+                    result = keyboard.mouse_button(button, down);
+                }
+                if let Err(err) = result {
+                    eprintln!("web: mouse event failed: {err}");
+                }
+            }));
         }
         Some(kind @ ("disk" | "cd")) => {
             let (drive, listed) = if kind == "cd" {

@@ -149,6 +149,7 @@
   <div class="actions">
     <button class="btn" id="sound" aria-pressed="false" title="Play the DOS sound (Sound Blaster, AdLib, PC speaker)">🔇 Sound</button>
     <button class="btn" id="shot" title="Save the screen as a PNG">📷 Screenshot</button>
+    <button class="btn" id="mouse" aria-pressed="true" title="Capture the mouse for DOS when you click the screen (Esc releases it)">🖱 Mouse</button>
     <button class="btn" id="crt" aria-pressed="false" title="CRT scanlines">▤ CRT</button>
     <button class="btn" id="full" title="Fullscreen (Esc to leave)">⛶ Fullscreen</button>
     <button class="btn danger" id="cad" title="Send Ctrl+Alt+Delete (reboots DOS)">⟲ Ctrl+Alt+Del</button>
@@ -159,7 +160,7 @@
   <div class="monitor" id="monitor">
     <div class="glass" id="glass">
       <canvas id="screen" width="720" height="400" aria-label="DOS screen"></canvas>
-      <div class="hint">⌨ click the screen to type</div>
+      <div class="hint">⌨ click the screen to type and use the mouse</div>
       <div class="veil">reconnecting…</div>
     </div>
     <div class="bezel-foot"><span class="led"></span><span>Coaba DOS Lab</span></div>
@@ -349,12 +350,88 @@ function setCrt(on) {
 $("crt").addEventListener("click", () => setCrt(!$("glass").classList.contains("scanlines")));
 setCrt(pref("doslab-crt") === "on");
 
-// Fullscreen keeps keyboard focus on the screen.
+// Fullscreen keeps keyboard focus on the screen. There the browser lets Esc through to DOS
+// (keyboard lock; hold Esc to leave fullscreen).
 $("full").addEventListener("click", async () => {
   if (document.fullscreenElement) return document.exitFullscreen();
   await $("monitor").requestFullscreen?.();
+  navigator.keyboard?.lock?.(["Escape"]).catch(() => {});
   setFocus(true);
 });
+document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement) navigator.keyboard?.unlock?.(); });
+
+// Mouse: DOS drivers (CTMOUSE, MOUSE.COM) only take relative movement from the PS/2 mouse, so
+// the pointer is captured (Pointer Lock) and every movement is forwarded, scaled so the DOS
+// pointer keeps pace with the real one. Motion is batched per display frame. Esc releases.
+const MOUSE_BUTTON_NAMES = ["left", "middle", "right"];
+let mouseWanted = pref("doslab-mouse") !== "off", mouseDx = 0, mouseDy = 0;
+const heldButtons = new Set();
+const mouseLocked = () => document.pointerLockElement === screen;
+function setMouse(on) {
+  mouseWanted = on;
+  $("mouse").setAttribute("aria-pressed", String(on));
+  pref("doslab-mouse", on ? "on" : "off");
+  if (!on && mouseLocked()) document.exitPointerLock();
+}
+$("mouse").addEventListener("click", () => setMouse(!mouseWanted));
+setMouse(mouseWanted);
+function guestPixelsPerCssPixel() {
+  // The canvas is letterboxed (object-fit: contain): the drawn scale is the smaller ratio.
+  const scale = Math.min(screen.clientWidth / screen.width, screen.clientHeight / screen.height);
+  return scale > 0 ? 1 / scale : 1;
+}
+screen.addEventListener("mousedown", () => {
+  if (mouseWanted && !mouseLocked()) screen.requestPointerLock?.()?.catch?.(() => {});
+});
+document.addEventListener("pointerlockchange", () => {
+  document.body.classList.toggle("mouse-captured", mouseLocked());
+  if (mouseLocked()) {
+    toast("Mouse captured — press Esc to release it", "info");
+  } else {
+    // Don't leave a button held down in DOS.
+    for (const button of heldButtons) send({ type: "mouse", button, down: false });
+    heldButtons.clear();
+  }
+});
+// A real hand never moves this far in one event (a fast flick at 125 Hz is ~25 px); bigger
+// jumps are the browser re-centring its hidden pointer (seen in Chrome on Linux) and would fling
+// the DOS pointer across the screen.
+const MAX_MOUSE_EVENT = 300;
+document.addEventListener("mousemove", (e) => {
+  if (!mouseLocked()) return;
+  if (Math.abs(e.movementX) > MAX_MOUSE_EVENT || Math.abs(e.movementY) > MAX_MOUSE_EVENT) return;
+  const ratio = guestPixelsPerCssPixel();
+  mouseDx += e.movementX * ratio;
+  mouseDy += e.movementY * ratio;
+});
+function mouseButton(e, down) {
+  if (!mouseLocked()) return;
+  const button = MOUSE_BUTTON_NAMES[e.button];
+  if (!button) return;
+  e.preventDefault();
+  flushMouse();
+  if (down) heldButtons.add(button); else heldButtons.delete(button);
+  send({ type: "mouse", button, down });
+}
+document.addEventListener("mousedown", (e) => mouseButton(e, true));
+document.addEventListener("mouseup", (e) => mouseButton(e, false));
+screen.addEventListener("contextmenu", (e) => e.preventDefault());
+screen.addEventListener("wheel", (e) => {
+  if (!mouseLocked()) return;
+  e.preventDefault();
+  const button = e.deltaY < 0 ? "wheel-up" : "wheel-down";
+  send({ type: "mouse", button, down: true });
+  send({ type: "mouse", button, down: false });
+}, { passive: false });
+function flushMouse() {
+  const dx = Math.trunc(mouseDx), dy = Math.trunc(mouseDy);
+  if (dx || dy) {
+    send({ type: "mouse", dx, dy });
+    mouseDx -= dx;
+    mouseDy -= dy;
+  }
+}
+(function mouseLoop() { flushMouse(); requestAnimationFrame(mouseLoop); })();
 
 // Floppy and CD swapping (multi-disk installers, CD games): the lists come from the bridge's
 // disk directory. `kind` is the WebSocket message type and the upload path.

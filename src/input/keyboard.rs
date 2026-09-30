@@ -10,15 +10,55 @@ use crate::session::SharedQmp;
 const KEY_HOLD: Duration = Duration::from_millis(25);
 const KEY_DELAY: Duration = Duration::from_millis(45);
 
-/// Real-time keyboard over QMP `input-send-event` (QEMU qcodes).
+/// PS/2 mouse buttons as QEMU names them.
+pub const MOUSE_BUTTONS: [&str; 3] = ["left", "right", "middle"];
+
+/// Real-time keyboard and mouse over QMP `input-send-event` (QEMU qcodes and buttons).
+/// One queue for both, so a click with Shift held arrives in order.
 pub struct KeyboardController {
     qmp: SharedQmp,
     held_keys: HashSet<String>,
+    held_buttons: HashSet<&'static str>,
 }
 
 impl KeyboardController {
     pub fn new(qmp: SharedQmp) -> Self {
-        Self { qmp, held_keys: HashSet::new() }
+        Self { qmp, held_keys: HashSet::new(), held_buttons: HashSet::new() }
+    }
+
+    /// Relative motion for the PS/2 mouse: DOS drivers (CTMOUSE, MOUSE.COM) only understand
+    /// movement, never absolute positions.
+    pub fn mouse_move(&mut self, dx: i64, dy: i64) -> Result<(), Box<dyn Error>> {
+        if dx == 0 && dy == 0 {
+            return Ok(());
+        }
+        let args = json!({ "events": [
+            { "type": "rel", "data": { "axis": "x", "value": dx } },
+            { "type": "rel", "data": { "axis": "y", "value": dy } },
+        ]});
+        self.qmp.lock().unwrap().execute("input-send-event", Some(args))?;
+        Ok(())
+    }
+
+    /// `button` is one of MOUSE_BUTTONS, or "wheel-up"/"wheel-down" (clicked, not held).
+    pub fn mouse_button(&mut self, button: &str, down: bool) -> Result<(), Box<dyn Error>> {
+        let Some(&button) = MOUSE_BUTTONS.iter().chain(&["wheel-up", "wheel-down"]).find(|&&b| b == button) else {
+            return Err(format!("unknown mouse button '{button}'").into());
+        };
+        if MOUSE_BUTTONS.contains(&button) {
+            // Like keys: ignore repeats, remember what is down so release_all can let go.
+            let changed = if down { self.held_buttons.insert(button) } else { self.held_buttons.remove(button) };
+            if !changed {
+                return Ok(());
+            }
+        }
+        self.send_button(button, down)
+    }
+
+    fn send_button(&mut self, button: &str, down: bool) -> Result<(), Box<dyn Error>> {
+        let args = json!({ "events": [{ "type": "btn", "data": { "down": down, "button": button } }] });
+        self.qmp.lock().unwrap().execute("input-send-event", Some(args))?;
+        Ok(())
     }
 
     fn send_key_event(&mut self, qcode: &str, down: bool) -> Result<(), Box<dyn Error>> {
@@ -60,6 +100,9 @@ impl KeyboardController {
     pub fn release_all(&mut self) {
         for key in std::mem::take(&mut self.held_keys) {
             let _ = self.send_key_event(&key, false);
+        }
+        for button in std::mem::take(&mut self.held_buttons) {
+            let _ = self.send_button(button, false);
         }
     }
 
