@@ -8,7 +8,7 @@ use axum::routing::{get, post};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::input::InputSender;
 use crate::session::{self, SharedQmp};
@@ -20,8 +20,13 @@ const MAX_NAME_SUFFIX: u32 = 999;
 /// Largest floppy image (2.88M) plus headroom; axum's default body limit is 2 MB.
 const MAX_UPLOAD: usize = 3 * 1024 * 1024;
 
-/// How often each client checks for a new frame; QEMU pushes about 30 a second.
-const FRAME_CHECK: Duration = Duration::from_millis(33);
+/// How often each client checks for a new frame; QEMU pushes about 30 a second. Checking
+/// faster than that shortens the wait after an ack; unchanged frames cost nothing.
+const FRAME_CHECK: Duration = Duration::from_millis(10);
+/// Sent by the page once a frame is on screen.
+const FRAME_ACK: &str = r#"{"type":"frame"}"#;
+/// Send anyway if a frame goes unacknowledged this long.
+const ACK_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 struct AppState {
@@ -132,24 +137,35 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Resp
     ws.on_upgrade(move |socket| client_session(socket, state))
 }
 
-/// Pushes JPEG frames as binary messages; receives key events as JSON text:
+/// Pushes JPEG frames as binary messages, one at a time; receives JSON text: `{"type":"frame"}`
+/// once a frame is shown,
 /// `{"type":"key","code":"<qcode>","down":true,"repeat":false}`, `{"type":"release_all"}`,
 /// `{"type":"disk","name":"<file in disk_dir>"}` or `{"type":"eject"}`.
 async fn client_session(mut socket: WebSocket, state: AppState) {
     let mut video = VideoStream::new(state.framebuffer.clone());
     let mut ticker = tokio::time::interval(FRAME_CHECK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // One frame in flight: the next is sent only after the page shows this one ({"type":"frame"}).
+    // Without this, frames pile up in the socket whenever the browser draws slower than we send,
+    // and the picture (and so every key press) falls further and further behind.
+    let mut in_flight_since: Option<Instant> = None;
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {
+                // A lost ack (e.g. a page from before this protocol) must not freeze the picture.
+                if in_flight_since.is_some_and(|sent| sent.elapsed() < ACK_TIMEOUT) {
+                    continue;
+                }
                 if let Some(jpeg) = video.next_jpeg().await {
                     if socket.send(Message::Binary(jpeg.into())).await.is_err() {
                         break;
                     }
+                    in_flight_since = Some(Instant::now());
                 }
             }
             message = socket.recv() => match message {
+                Some(Ok(Message::Text(text))) if text.as_str() == FRAME_ACK => in_flight_since = None,
                 Some(Ok(Message::Text(text))) => handle_client_message(&state, text.as_str()),
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 Some(Ok(_)) => {}
