@@ -1,13 +1,15 @@
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::{Html, Response};
+use axum::response::{Html, Json, Response};
 use axum::routing::get;
-use serde_json::Value;
+use serde_json::{Value, json};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::input::InputSender;
+use crate::session::{self, SharedQmp};
 use crate::video::{Framebuffer, VideoStream};
 
 /// How often each client checks for a new frame; capture itself runs at CAPTURE_FPS.
@@ -17,17 +19,27 @@ const FRAME_CHECK: Duration = Duration::from_millis(50);
 struct AppState {
     framebuffer: Arc<Mutex<Framebuffer>>,
     input: InputSender,
+    qmp: SharedQmp,
+    /// Floppy images offered by the disk picker; clients pick by file name only.
+    disk_dir: Arc<PathBuf>,
 }
 
 /// Serve the browser client on its own tokio runtime thread.
-pub fn spawn_server(addr: String, framebuffer: Arc<Mutex<Framebuffer>>, input: InputSender) {
+pub fn spawn_server(
+    addr: String,
+    framebuffer: Arc<Mutex<Framebuffer>>,
+    input: InputSender,
+    qmp: SharedQmp,
+    disk_dir: PathBuf,
+) {
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
         runtime.block_on(async move {
             let app = Router::new()
                 .route("/", get(index))
                 .route("/ws", get(ws_upgrade))
-                .with_state(AppState { framebuffer, input });
+                .route("/disks", get(disks))
+                .with_state(AppState { framebuffer, input, qmp, disk_dir: Arc::new(disk_dir) });
             let listener = match tokio::net::TcpListener::bind(&addr).await {
                 Ok(listener) => listener,
                 Err(err) => return eprintln!("web: cannot listen on {addr}: {err}"),
@@ -44,12 +56,17 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("index.html"))
 }
 
+async fn disks(State(state): State<AppState>) -> Json<Value> {
+    Json(json!(session::list_floppies(&state.disk_dir)))
+}
+
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| client_session(socket, state))
 }
 
 /// Pushes JPEG frames as binary messages; receives key events as JSON text:
-/// `{"type":"key","code":"<qcode>","down":true,"repeat":false}` or `{"type":"release_all"}`.
+/// `{"type":"key","code":"<qcode>","down":true,"repeat":false}`, `{"type":"release_all"}`,
+/// `{"type":"disk","name":"<file in disk_dir>"}` or `{"type":"eject"}`.
 async fn client_session(mut socket: WebSocket, state: AppState) {
     let mut video = VideoStream::new(state.framebuffer.clone());
     let mut ticker = tokio::time::interval(FRAME_CHECK);
@@ -65,7 +82,7 @@ async fn client_session(mut socket: WebSocket, state: AppState) {
                 }
             }
             message = socket.recv() => match message {
-                Some(Ok(Message::Text(text))) => handle_client_message(&state.input, text.as_str()),
+                Some(Ok(Message::Text(text))) => handle_client_message(&state, text.as_str()),
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 Some(Ok(_)) => {}
             }
@@ -76,7 +93,8 @@ async fn client_session(mut socket: WebSocket, state: AppState) {
     let _ = state.input.send(Box::new(|keyboard| keyboard.release_all()));
 }
 
-fn handle_client_message(input: &InputSender, text: &str) {
+fn handle_client_message(state: &AppState, text: &str) {
+    let input = &state.input;
     let Ok(message) = serde_json::from_str::<Value>(text) else {
         return eprintln!("web: bad message: {text}");
     };
@@ -100,6 +118,29 @@ fn handle_client_message(input: &InputSender, text: &str) {
         }
         Some("release_all") => {
             let _ = input.send(Box::new(|keyboard| keyboard.release_all()));
+        }
+        Some("disk") => {
+            let Some(name) = message["name"].as_str() else {
+                return eprintln!("web: bad disk message: {text}");
+            };
+            // Only names from the picker's own listing, so a client can't point QEMU at other files.
+            if !session::list_floppies(&state.disk_dir).iter().any(|listed| listed == name) {
+                return eprintln!("web: not a floppy in {}: {name}", state.disk_dir.display());
+            }
+            let path = state.disk_dir.join(name);
+            let qmp = state.qmp.clone();
+            tokio::task::spawn_blocking(move || match qmp.lock().unwrap().change_floppy(&path) {
+                Ok(()) => println!("web: A: now holds {}", path.display()),
+                Err(err) => eprintln!("web: disk change failed: {err}"),
+            });
+        }
+        Some("eject") => {
+            let qmp = state.qmp.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(err) = qmp.lock().unwrap().eject_floppy() {
+                    eprintln!("web: eject failed: {err}");
+                }
+            });
         }
         _ => eprintln!("web: unknown message: {text}"),
     }

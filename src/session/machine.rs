@@ -152,6 +152,22 @@ impl Machine {
 /// Standard PC floppy image sizes: 360K, 720K, 1.2M, 1.44M, 2.88M.
 const FLOPPY_SIZES: [u64; 5] = [368_640, 737_280, 1_228_800, 1_474_560, 2_949_120];
 
+pub fn is_floppy_image(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && FLOPPY_SIZES.contains(&meta.len()))
+}
+
+/// File names of the floppy images in `dir`, sorted, for the disk picker.
+pub fn list_floppies(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|entry| is_floppy_image(&entry.path()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    names
+}
+
 /// Floppy boot sectors print "Error!" when attached as a hard disk, so pick the
 /// bus from the image size. BOOT_MODE=hdd|floppy overrides, as in start.sh.
 /// `extra_disk` is a blank or existing raw hard disk (e.g. to install DOS onto):
@@ -159,10 +175,7 @@ const FLOPPY_SIZES: [u64; 5] = [368_640, 737_280, 1_228_800, 1_474_560, 2_949_12
 fn drive_args(image: &Path, extra_disk: Option<&Path>) -> Result<Vec<String>, Box<dyn Error>> {
     let mode = match std::env::var("BOOT_MODE") {
         Ok(mode) => mode,
-        Err(_) => {
-            let size = std::fs::metadata(image)?.len();
-            if FLOPPY_SIZES.contains(&size) { "floppy" } else { "hdd" }.to_string()
-        }
+        Err(_) => if is_floppy_image(image) { "floppy" } else { "hdd" }.to_string(),
     };
     let file = image.display();
     let (drive, boot, disk_index) = match mode.as_str() {
@@ -172,6 +185,11 @@ fn drive_args(image: &Path, extra_disk: Option<&Path>) -> Result<Vec<String>, Bo
     };
     println!("Boot mode: {mode}");
     let mut args = vec!["-drive".into(), drive, "-boot".into(), boot.into()];
+    if mode == "hdd" {
+        // Empty drive A: so floppies can be inserted later (`!disk`, web disk picker).
+        args.push("-drive".into());
+        args.push("if=floppy,index=0".into());
+    }
     if let Some(disk) = extra_disk {
         if !disk.is_file() {
             return Err(format!("extra disk image not found: {}", disk.display()).into());
