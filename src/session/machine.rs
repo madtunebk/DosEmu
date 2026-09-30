@@ -18,7 +18,7 @@ pub struct Machine {
 }
 
 impl Machine {
-    pub fn start(image_path: &Path, extra_disk: Option<&Path>) -> Result<Self, Box<dyn Error>> {
+    pub fn start(image_path: Option<&Path>, extra_disk: Option<&Path>, cdrom: Option<&Path>) -> Result<Self, Box<dyn Error>> {
         let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
         let uid = std::env::var("UID").unwrap_or_else(|_| {
             let output = std::process::Command::new("id").arg("-u").output();
@@ -46,10 +46,13 @@ impl Machine {
             std::fs::remove_file(&dbus_address_file)?;
         }
 
-        let image = image_path.canonicalize().unwrap_or_else(|_| image_path.to_path_buf());
         let qemu_bin = std::env::var("QEMU_BIN").unwrap_or_else(|_| "qemu-system-i386".to_string());
-        let extra_disk = extra_disk.map(|disk| disk.canonicalize().unwrap_or_else(|_| disk.to_path_buf()));
-        let drive = drive_args(&image, extra_disk.as_deref())?;
+        let absolute = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let drive = drive_args(
+            image_path.map(absolute).as_deref(),
+            extra_disk.map(absolute).as_deref(),
+            cdrom.map(absolute).as_deref(),
+        )?;
 
         // --nofork keeps the daemon as our child so we can kill it when QEMU exits.
         let mut dbus = Command::new("dbus-daemon")
@@ -188,48 +191,82 @@ pub fn is_floppy_image(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && is_floppy_size(meta.len()))
 }
 
-/// File names of the floppy images in `dir`, sorted, for the disk picker.
-pub fn list_floppies(dir: &Path) -> Vec<String> {
+/// Uploads in progress are hidden files; never offer them.
+fn listed_names(dir: &Path, keep: impl Fn(&Path, &str) -> bool) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut names: Vec<String> = entries
         .flatten()
-        .filter(|entry| is_floppy_image(&entry.path()))
-        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter_map(|entry| Some((entry.path(), entry.file_name().into_string().ok()?)))
+        .filter(|(path, name)| !name.starts_with('.') && keep(path, name))
+        .map(|(_, name)| name)
         .collect();
     names.sort();
     names
 }
 
-/// Floppy boot sectors print "Error!" when attached as a hard disk, so pick the
-/// bus from the image size. BOOT_MODE=hdd|floppy overrides, as in start.sh.
-/// `extra_disk` is a blank or existing raw hard disk (e.g. to install DOS onto):
-/// C: when booting a floppy, D: otherwise.
-fn drive_args(image: &Path, extra_disk: Option<&Path>) -> Result<Vec<String>, Box<dyn Error>> {
-    let mode = match std::env::var("BOOT_MODE") {
-        Ok(mode) => mode,
-        Err(_) => if is_floppy_image(image) { "floppy" } else { "hdd" }.to_string(),
-    };
-    let file = image.display();
-    let (drive, boot, disk_index) = match mode.as_str() {
-        "hdd" => (format!("file={file},format=raw,if=ide,index=0,media=disk"), "c", 1),
-        "floppy" => (format!("file={file},format=raw,if=floppy,index=0"), "a", 0),
-        other => return Err(format!("BOOT_MODE must be 'hdd' or 'floppy', got '{other}'").into()),
-    };
-    println!("Boot mode: {mode}");
-    let mut args = vec!["-drive".into(), drive, "-boot".into(), boot.into()];
-    if mode == "hdd" {
-        // Empty drive A: so floppies can be inserted later (`!disk`, web disk picker).
-        args.push("-drive".into());
-        args.push("if=floppy,index=0".into());
-    }
-    if let Some(disk) = extra_disk {
-        if !disk.is_file() {
-            return Err(format!("extra disk image not found: {}", disk.display()).into());
+/// File names of the floppy images in `dir`, sorted, for the disk picker.
+pub fn list_floppies(dir: &Path) -> Vec<String> {
+    listed_names(dir, |path, _| is_floppy_image(path))
+}
+
+pub fn is_iso_name(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".iso")
+}
+
+/// File names of the CD images (.iso) in `dir`, sorted, for the CD picker.
+pub fn list_isos(dir: &Path) -> Vec<String> {
+    listed_names(dir, |path, name| is_iso_name(name) && path.is_file())
+}
+
+/// Drives for the VM. The boot image is a floppy or hard disk (by size; BOOT_MODE=hdd|floppy
+/// overrides, as in start.sh); without one the VM boots from the CD. `extra_disk` is a raw hard
+/// disk (e.g. to install DOS onto): C: unless the boot image is itself a hard disk, then D:.
+/// Drive A: and the CD drive always exist, empty if nothing is given, so media can be
+/// inserted later (`!disk`, `!cd`, the web pickers).
+fn drive_args(image: Option<&Path>, extra_disk: Option<&Path>, cdrom: Option<&Path>) -> Result<Vec<String>, Box<dyn Error>> {
+    for (what, path) in [("image", image), ("extra disk", extra_disk), ("CD image", cdrom)] {
+        if let Some(path) = path.filter(|path| !path.is_file()) {
+            return Err(format!("{what} not found: {}", path.display()).into());
         }
-        println!("Extra disk: {} (IDE index {disk_index})", disk.display());
-        args.push("-drive".into());
-        args.push(format!("file={},format=raw,if=ide,index={disk_index},media=disk", disk.display()));
     }
+    let mode = match (image, std::env::var("BOOT_MODE")) {
+        (None, _) => "cdrom".to_string(),
+        (Some(_), Ok(mode)) => mode,
+        (Some(image), Err(_)) => if is_floppy_image(image) { "floppy" } else { "hdd" }.to_string(),
+    };
+    let drive = |spec: String| ["-drive".to_string(), spec];
+    let mut args = Vec::new();
+    let mut floppy = "if=floppy,index=0".to_string();
+    let mut next_disk_index = 0;
+    match (mode.as_str(), image) {
+        ("floppy", Some(image)) => floppy = format!("file={},format=raw,if=floppy,index=0", image.display()),
+        ("hdd", Some(image)) => {
+            args.extend(drive(format!("file={},format=raw,if=ide,index=0,media=disk", image.display())));
+            next_disk_index = 1;
+        }
+        ("cdrom", _) => {}
+        (other, _) => return Err(format!("BOOT_MODE must be 'hdd' or 'floppy', got '{other}'").into()),
+    }
+    args.extend(drive(floppy));
+    if let Some(disk) = extra_disk {
+        println!("Extra disk: {} (IDE index {next_disk_index})", disk.display());
+        args.extend(drive(format!("file={},format=raw,if=ide,index={next_disk_index},media=disk", disk.display())));
+    }
+    let cd = match cdrom {
+        Some(iso) => {
+            println!("CD: {}", iso.display());
+            format!("file={},format=raw,if=ide,index=2,media=cdrom", iso.display())
+        }
+        None => "if=ide,index=2,media=cdrom".to_string(),
+    };
+    args.extend(drive(cd));
+    let boot = match mode.as_str() {
+        "floppy" => "a",
+        "hdd" => "c",
+        _ => "d",
+    };
+    args.extend(["-boot".to_string(), boot.to_string()]);
+    println!("Boot mode: {mode}");
     Ok(args)
 }
 
