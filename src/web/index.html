@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coaba DOS Lab</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #111; color: #9a9a9a;
+               font: 13px/1.4 ui-monospace, "DejaVu Sans Mono", monospace; }
+  body { display: flex; flex-direction: column; }
+  #screen-wrap { flex: 1; display: flex; align-items: center; justify-content: center;
+                 min-height: 0; padding: 12px; }
+  /* Fill the space and keep the guest's aspect ratio (it changes with the video mode). */
+  #screen { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; }
+  #screen-wrap { outline: 2px solid transparent; outline-offset: -2px; }
+  body.focused #screen-wrap { outline-color: #2a6; }
+  #bar { display: flex; gap: 16px; align-items: center; padding: 6px 12px; background: #1a1a1a; }
+  #status.ok { color: #2d6; } #status.bad { color: #f55; }
+  #bar button { font: inherit; background: #262626; color: #ccc; border: 1px solid #333;
+                padding: 2px 10px; cursor: pointer; }
+  .spacer { flex: 1; }
+</style>
+</head>
+<body>
+<div id="screen-wrap"><img id="screen" alt="DOS screen"></div>
+<div id="bar">
+  <span id="status">connecting…</span>
+  <span id="fps"></span>
+  <span class="spacer"></span>
+  <span>click the screen to type</span>
+  <button id="cad" title="Ctrl+Alt+Delete">Ctrl+Alt+Del</button>
+</div>
+<script>
+// KeyboardEvent.code (physical key) -> QEMU qcode. Physical codes keep this layout-independent.
+const QCODES = {
+  Escape: "esc", Backspace: "backspace", Tab: "tab", Enter: "ret", Space: "spc",
+  ShiftLeft: "shift", ShiftRight: "shift_r", ControlLeft: "ctrl", ControlRight: "ctrl_r",
+  AltLeft: "alt", AltRight: "alt_r", CapsLock: "caps_lock", NumLock: "num_lock",
+  ScrollLock: "scroll_lock", ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left",
+  ArrowRight: "right", Insert: "insert", Delete: "delete", Home: "home", End: "end",
+  PageUp: "pgup", PageDown: "pgdn", Minus: "minus", Equal: "equal",
+  BracketLeft: "bracket_left", BracketRight: "bracket_right", Backslash: "backslash",
+  Semicolon: "semicolon", Quote: "apostrophe", Backquote: "grave_accent", Comma: "comma",
+  Period: "dot", Slash: "slash", NumpadEnter: "kp_enter", NumpadAdd: "kp_add",
+  NumpadSubtract: "kp_subtract", NumpadMultiply: "kp_multiply", NumpadDivide: "kp_divide",
+  NumpadDecimal: "kp_decimal",
+};
+function toQcode(code) {
+  if (QCODES[code]) return QCODES[code];
+  let m;
+  if ((m = code.match(/^Key([A-Z])$/))) return m[1].toLowerCase();
+  if ((m = code.match(/^Digit([0-9])$/))) return m[1];
+  if ((m = code.match(/^Numpad([0-9])$/))) return "kp_" + m[1];
+  if ((m = code.match(/^F([1-9]|1[0-2])$/))) return "f" + m[1];
+  return null;
+}
+
+const screen = document.getElementById("screen");
+const status = document.getElementById("status");
+const fpsLabel = document.getElementById("fps");
+let ws = null, focused = false, frames = 0, lastUrl = null;
+
+function send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
+function setStatus(text, cls) { status.textContent = text; status.className = cls; }
+
+function connect() {
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  ws.binaryType = "blob";
+  ws.onopen = () => setStatus("connected", "ok");
+  ws.onmessage = (event) => {
+    const url = URL.createObjectURL(event.data);
+    screen.onload = () => { if (lastUrl) URL.revokeObjectURL(lastUrl); lastUrl = url; };
+    screen.src = url;
+    frames++;
+  };
+  ws.onclose = () => { setStatus("disconnected — retrying", "bad"); setTimeout(connect, 1000); };
+}
+
+setInterval(() => { fpsLabel.textContent = `${frames} frames/s`; frames = 0; }, 1000);
+
+// Keys go to DOS only while the screen has focus, so the page stays usable otherwise.
+screen.addEventListener("mousedown", (e) => { e.preventDefault(); setFocus(true); });
+document.addEventListener("mousedown", (e) => { if (e.target !== screen) setFocus(false); });
+window.addEventListener("blur", () => setFocus(false));
+function setFocus(on) {
+  if (focused && !on) {
+    send({ type: "release_all" });
+    for (const mod of Object.keys(heldMods)) heldMods[mod] = false;
+  }
+  focused = on;
+  document.body.classList.toggle("focused", on);
+}
+
+// Modifier state as the guest sees it. Synced from each event's flags, because a modifier's own
+// keydown/keyup can be missed (pressed before focusing, released after Alt+Tab, synthetic input).
+const heldMods = { shift: false, ctrl: false, alt: false };
+const MOD_OF = { shift: "shift", shift_r: "shift", ctrl: "ctrl", ctrl_r: "ctrl", alt: "alt", alt_r: "alt" };
+function syncModifiers(event, code) {
+  const wanted = { shift: event.shiftKey, ctrl: event.ctrlKey, alt: event.altKey };
+  for (const mod of Object.keys(heldMods)) {
+    if (MOD_OF[code] === mod || heldMods[mod] === wanted[mod]) continue;
+    heldMods[mod] = wanted[mod];
+    send({ type: "key", code: mod, down: wanted[mod] });
+  }
+}
+
+function onKey(event, down) {
+  if (!focused) return;
+  const code = toQcode(event.code);
+  if (!code) return;
+  event.preventDefault(); // keep Tab, F-keys, Backspace, arrows away from the browser
+  syncModifiers(event, code);
+  if (MOD_OF[code]) heldMods[MOD_OF[code]] = down;
+  // Held keys repeat like a real keyboard's typematic: extra key-downs, no key-up between.
+  send({ type: "key", code, down, repeat: down && event.repeat });
+}
+document.addEventListener("keydown", (e) => onKey(e, true));
+document.addEventListener("keyup", (e) => onKey(e, false));
+
+document.getElementById("cad").addEventListener("click", () => {
+  for (const code of ["ctrl", "alt", "delete"]) send({ type: "key", code, down: true });
+  for (const code of ["delete", "alt", "ctrl"]) send({ type: "key", code, down: false });
+});
+
+connect();
+</script>
+</body>
+</html>
