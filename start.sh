@@ -109,5 +109,4 @@ exec "${QEMU_BIN}" \
     -display "dbus,addr=${QEMU_DBUS_ADDRESS}" \
     -qmp "unix:${QMP_SOCKET},server=on,wait=off" \
     -nic none \
-    -rtc base=localtime \
-    -no-reboot
+    -rtc base=localtime
