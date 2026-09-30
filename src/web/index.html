@@ -80,14 +80,16 @@ function connect() {
   ws.binaryType = "arraybuffer";
   ws.onopen = () => setStatus("connected", "ok");
   // Each message is the part of the screen that changed: u16 LE screen width, screen height,
-  // x, y, then that area as JPEG. The next one is requested only once this one is drawn,
+  // x, y, then that area as PNG or JPEG. The next one is requested only once this one is drawn,
   // so frames never queue up (that is lag).
   ws.onmessage = async (event) => {
     const header = new DataView(event.data, 0, 8);
     const [width, height, x, y] = [0, 2, 4, 6].map((offset) => header.getUint16(offset, true));
     try {
-      const jpeg = new Blob([new Uint8Array(event.data, 8)], { type: "image/jpeg" });
-      const bitmap = await createImageBitmap(jpeg);
+      const bytes = new Uint8Array(event.data, 8);
+      // Lossless PNG normally; JPEG only for areas with more than 256 colours.
+      const type = bytes[0] === 0x89 ? "image/png" : "image/jpeg";
+      const bitmap = await createImageBitmap(new Blob([bytes], { type }));
       // Resizing clears the canvas; a new size always arrives as a full frame.
       if (screen.width !== width || screen.height !== height) {
         screen.width = width;

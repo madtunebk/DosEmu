@@ -2,6 +2,7 @@ pub mod capture;
 pub mod dbus_display;
 pub mod framebuffer;
 pub mod jpeg;
+pub mod png;
 pub mod stream;
 
 use std::sync::atomic::AtomicU64;
