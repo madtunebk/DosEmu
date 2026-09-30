@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
@@ -13,8 +14,10 @@ use crate::session::dbus_listener;
 const AUDIO_PATH: &str = "/org/qemu/Display1/Audio";
 const AUDIO_INTERFACE: &str = "org.qemu.Display1.Audio";
 const LISTENER_PATH: &str = "/org/qemu/Display1/AudioOutListener";
-/// Peak below which a chunk counts as silence and isn't sent.
+/// Peak below which a chunk counts as quiet (-36 dBFS).
 const SILENCE: u16 = 512;
+/// Quiet chunks still sent before sending stops (QEMU's are ~23 ms each: ~0.2 s).
+const SILENCE_HANGOVER: u32 = 8;
 /// Chunks buffered per client; a client further behind than this skips ahead (no growing lag).
 const CLIENT_BACKLOG: usize = 32;
 
@@ -36,7 +39,7 @@ impl AudioOut {
 
 pub fn start(dbus_address: &str) -> Result<AudioOut, Box<dyn Error>> {
     let (sender, _) = broadcast::channel(CLIENT_BACKLOG);
-    let listener = OutListener { sender: sender.clone(), voices: Mutex::new(HashMap::new()) };
+    let listener = OutListener { sender: sender.clone(), voices: Mutex::new(HashMap::new()), quiet_run: AtomicU32::new(0) };
     let address = dbus_address.to_string();
     dbus_listener::run_on_own_thread("audio", move || async move {
         let bus = zbus::connection::Builder::address(address.as_str())?.build().await?;
@@ -68,6 +71,8 @@ struct Voice {
 struct OutListener {
     sender: broadcast::Sender<AudioChunk>,
     voices: Mutex<HashMap<u64, Voice>>,
+    /// Consecutive quiet chunks.
+    quiet_run: AtomicU32,
 }
 
 /// Method names and signatures follow QEMU's org.qemu.Display1.AudioOutListener
@@ -120,10 +125,15 @@ impl OutListener {
         let Some(samples) = to_s16(format, &data) else {
             return eprintln!("audio: unsupported format {format:?}");
         };
-        // Silence is sent as nothing; the page simply plays nothing until sound arrives. An idle
-        // Sound Blaster still outputs faint noise (peaks ~255 of 32767), which would otherwise
-        // cost 176 KB/s; below SILENCE (-36 dBFS) counts as silence.
-        if samples.iter().all(|&sample| sample.unsigned_abs() < SILENCE) {
+        // Long silence is sent as nothing (an idle Sound Blaster still outputs faint noise, peaks
+        // ~255 of 32767, that would cost 176 KB/s). Only after a while, though: dropping every
+        // quiet chunk would punch holes into fades and soft notes.
+        let quiet = samples.iter().all(|&sample| sample.unsigned_abs() < SILENCE);
+        let quiet_run = if quiet { self.quiet_run.fetch_add(1, Ordering::Relaxed) + 1 } else { 0 };
+        if !quiet {
+            self.quiet_run.store(0, Ordering::Relaxed);
+        }
+        if quiet_run > SILENCE_HANGOVER {
             return;
         }
         let mut chunk = Vec::with_capacity(8 + samples.len() * 2);
