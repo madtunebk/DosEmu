@@ -45,6 +45,7 @@
     <button id="cd-eject">Eject</button>
   </span>
   <span id="disk-msg">drop a .img or .iso here</span>
+  <button id="sound" title="Play the DOS sound (Sound Blaster, AdLib, PC speaker) here">🔇 Sound</button>
   <button id="cad" title="Ctrl+Alt+Delete">Ctrl+Alt+Del</button>
 </div>
 <script>
@@ -221,6 +222,64 @@ document.addEventListener("drop", async (e) => {
     setDiskMsg(String(err.message || err), true);
   }
 });
+
+// Sound: /audio sends 16-bit PCM chunks (u32 LE sample rate, u16 LE channels, u16 0, samples).
+// Chunks are queued back to back ~60 ms ahead of the clock; if playback drifts out of that
+// window it resyncs, so sound never lags behind the picture. Browsers only allow audio after a
+// click, so it starts from the button (or a click on the screen once it has been turned on).
+const soundButton = document.getElementById("sound");
+const SOUND_LEAD = 0.06, SOUND_MAX_LEAD = 0.25;
+let audioCtx = null, audioWs = null, soundWanted = false, nextPlay = 0;
+try { soundWanted = localStorage.getItem("doslab-sound") === "on"; } catch {}
+
+function setSound(on) {
+  soundWanted = on;
+  try { localStorage.setItem("doslab-sound", on ? "on" : "off"); } catch {}
+  if (on) startSound(); else stopSound();
+}
+function startSound() {
+  audioCtx ??= new AudioContext();
+  audioCtx.resume();
+  if (audioWs) return;
+  let heard = false;
+  audioWs = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/audio`);
+  audioWs.binaryType = "arraybuffer";
+  audioWs.onopen = () => { soundButton.textContent = "🔊 Sound"; };
+  audioWs.onmessage = (event) => { heard = true; playChunk(event.data); };
+  audioWs.onclose = () => {
+    audioWs = null;
+    if (!soundWanted) return;
+    // Closed before any sound: this QEMU exports none. Otherwise reconnect like the video.
+    if (!heard) soundButton.textContent = "🔇 no sound";
+    setTimeout(() => { if (soundWanted) startSound(); }, heard ? 1000 : 5000);
+  };
+}
+function stopSound() {
+  soundButton.textContent = "🔇 Sound";
+  if (audioWs) { audioWs.onclose = null; audioWs.close(); audioWs = null; }
+  audioCtx?.suspend();
+}
+function playChunk(data) {
+  const header = new DataView(data, 0, 8);
+  const rate = header.getUint32(0, true), channels = header.getUint16(4, true);
+  const samples = new Int16Array(data, 8);
+  const frames = Math.floor(samples.length / channels);
+  if (!frames || !audioCtx) return;
+  const buffer = audioCtx.createBuffer(channels, frames, rate);
+  for (let c = 0; c < channels; c++) {
+    const out = buffer.getChannelData(c);
+    for (let i = 0; i < frames; i++) out[i] = samples[i * channels + c] / 32768;
+  }
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioCtx.destination);
+  const now = audioCtx.currentTime;
+  if (nextPlay < now || nextPlay > now + SOUND_MAX_LEAD) nextPlay = now + SOUND_LEAD;
+  source.start(nextPlay);
+  nextPlay += buffer.duration;
+}
+soundButton.addEventListener("click", () => setSound(!soundWanted));
+screen.addEventListener("mousedown", () => { if (soundWanted && !audioWs) startSound(); });
 
 loadImages("disk");
 loadImages("cd");

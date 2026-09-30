@@ -13,6 +13,7 @@ use tokio::io::AsyncWriteExt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::audio::AudioOut;
 use crate::input::InputSender;
 use crate::session::{self, Drive, SharedQmp};
 use crate::video::{Framebuffer, VideoStream};
@@ -42,6 +43,8 @@ struct AppState {
     qmp: SharedQmp,
     /// Floppy and CD images offered by the pickers; clients pick by file name only.
     disk_dir: Arc<PathBuf>,
+    /// Guest sound, if QEMU exports it.
+    audio: Option<AudioOut>,
 }
 
 /// Serve the browser client on its own tokio runtime thread.
@@ -51,6 +54,7 @@ pub fn spawn_server(
     input: InputSender,
     qmp: SharedQmp,
     disk_dir: PathBuf,
+    audio: Option<AudioOut>,
 ) {
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
@@ -58,11 +62,12 @@ pub fn spawn_server(
             let app = Router::new()
                 .route("/", get(index))
                 .route("/ws", get(ws_upgrade))
+                .route("/audio", get(audio_upgrade))
                 .route("/disks", get(disks))
                 .route("/disks/{name}", post(upload_disk).layer(DefaultBodyLimit::max(MAX_FLOPPY_UPLOAD)))
                 .route("/cds", get(cds))
                 .route("/cds/{name}", post(upload_cd).layer(DefaultBodyLimit::max(MAX_CD_UPLOAD)))
-                .with_state(AppState { framebuffer, input, qmp, disk_dir: Arc::new(disk_dir) });
+                .with_state(AppState { framebuffer, input, qmp, disk_dir: Arc::new(disk_dir), audio });
             let listener = match tokio::net::TcpListener::bind(&addr).await {
                 Ok(listener) => listener,
                 Err(err) => return eprintln!("web: cannot listen on {addr}: {err}"),
@@ -208,6 +213,36 @@ async fn same_contents(a: &FsPath, b: &FsPath) -> std::io::Result<bool> {
         }
     })
     .await?
+}
+
+/// Guest sound as binary messages (see crate::audio::AudioChunk). Closed at once if there is no
+/// sound, so the page can say so.
+async fn audio_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+    ws.on_upgrade(move |mut socket| async move {
+        let Some(audio) = state.audio else {
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        };
+        let mut chunks = audio.subscribe();
+        loop {
+            tokio::select! {
+                chunk = chunks.recv() => match chunk {
+                    Ok(chunk) => {
+                        if socket.send(Message::Binary(chunk.to_vec().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Fell behind: skip what was missed rather than play it late.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+                message = socket.recv() => match message {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(_)) => {}
+                },
+            }
+        }
+    })
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
