@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::error::Error;
 
 /// Encode an RGB24 area as an indexed (palette) PNG in memory: lossless and small for DOS
@@ -12,28 +11,59 @@ pub fn encode_indexed(width: u32, height: u32, rgb: &[u8]) -> Option<Result<Vec<
 /// Split packed RGB24 into a palette (flat RGB, at most 256 entries) and one index per pixel.
 fn index_colors(rgb: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut palette = Vec::with_capacity(16 * 3);
-    let mut lookup: HashMap<[u8; 3], u8> = HashMap::new();
+    let mut table = ColorTable::new();
     let mut indices = Vec::with_capacity(rgb.len() / 3);
-    // Neighbouring pixels are usually the same colour; skip the map lookup for runs.
-    let mut last: Option<([u8; 3], u8)> = None;
+    // Neighbouring pixels are usually the same colour; skip the lookup for runs.
+    let mut last: Option<(u32, u8)> = None;
     for px in rgb.chunks_exact(3) {
-        let color = [px[0], px[1], px[2]];
+        let color = u32::from(px[0]) << 16 | u32::from(px[1]) << 8 | u32::from(px[2]);
         let index = match last {
             Some((last_color, index)) if last_color == color => index,
-            _ => match lookup.get(&color) {
-                Some(&index) => index,
-                None => {
-                    let index = u8::try_from(lookup.len()).ok()?;
-                    lookup.insert(color, index);
-                    palette.extend_from_slice(&color);
-                    index
-                }
-            },
+            _ => table.index_of(color, || {
+                let index = u8::try_from(palette.len() / 3).ok()?;
+                palette.extend_from_slice(&px[..3]);
+                Some(index)
+            })?,
         };
         last = Some((color, index));
         indices.push(index);
     }
     Some((palette, indices))
+}
+
+/// Colour -> palette index for at most 256 colours: open addressing in a fixed table four times
+/// that size with a multiplicative hash. Replaces a HashMap whose SipHash was ~40% of streaming.
+struct ColorTable {
+    /// color | OCCUPIED, 0 = empty.
+    keys: [u32; ColorTable::SIZE],
+    values: [u8; ColorTable::SIZE],
+}
+
+impl ColorTable {
+    const SIZE: usize = 1024;
+    const OCCUPIED: u32 = 1 << 24;
+
+    fn new() -> Self {
+        Self { keys: [0; Self::SIZE], values: [0; Self::SIZE] }
+    }
+
+    /// The colour's index, adding it with `add` if new. None if `add` refuses (palette full).
+    fn index_of(&mut self, color: u32, add: impl FnOnce() -> Option<u8>) -> Option<u8> {
+        let key = color | Self::OCCUPIED;
+        let mut slot = (color.wrapping_mul(0x9E37_79B1) >> 22) as usize;
+        loop {
+            match self.keys[slot] {
+                k if k == key => return Some(self.values[slot]),
+                0 => {
+                    let index = add()?;
+                    self.keys[slot] = key;
+                    self.values[slot] = index;
+                    return Some(index);
+                }
+                _ => slot = (slot + 1) % Self::SIZE,
+            }
+        }
+    }
 }
 
 fn write_png(width: u32, height: u32, palette: &[u8], indices: &[u8]) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
