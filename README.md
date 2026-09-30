@@ -45,6 +45,9 @@ target/release/doslab c.img                        # afterwards, boot from C:
 ## The web page
 
 - **Screen:** click it to send keys to DOS (the frame glows amber while it has the keyboard).
+- **🖱 Mouse:** clicking the screen also captures the mouse for DOS (needs a DOS mouse driver
+  such as CTMOUSE, which FreeDOS loads). **Esc** gives the pointer back; in fullscreen Esc goes
+  to DOS and you hold Esc to leave. Turn the button off for programs without mouse support.
 - **🔊 Sound:** plays the Sound Blaster 16, AdLib and PC speaker. Browsers only allow audio
   after a click; once turned on, a click on the screen restarts it. The header shows
   `gaps`/`drops` counters if playback struggles.
@@ -107,7 +110,8 @@ While `doslab` runs, its terminal accepts:
   flight at a time so a slow browser never builds up lag.
 - **Sound:** the sound cards play into QEMU's D-Bus audio backend; the bridge forwards 16-bit
   PCM to the page, which plays it ~100 ms ahead with Web Audio and never overlaps chunks.
-- **Keyboard and drives:** QMP `input-send-event` and `blockdev-change-medium`.
+- **Keyboard, mouse and drives:** QMP `input-send-event` (keys, relative PS/2 mouse motion
+  and buttons, in one ordered queue) and `blockdev-change-medium`.
 - **Robustness:** a program that crashes the virtual CPU reboots DOS instead of ending the
   emulator.
 
