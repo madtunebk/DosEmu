@@ -78,6 +78,7 @@ impl Machine {
             .unwrap_or(&dbus_address)
             .to_string();
 
+        let sound_cards = sound_card_args(&qemu_bin);
         let qemu = |accel: &str| {
             let mut command = Command::new(&qemu_bin);
             command
@@ -86,6 +87,7 @@ impl Machine {
                 // PipeWire, ALSA...) from inside our private D-Bus session, which crashed QEMU on
                 // the first beep. Sound is meant to reach the browser through the bridge instead.
                 .args(["-audiodev", "none,id=snd0", "-machine", "pc,pcspk-audiodev=snd0"])
+                .args(&sound_cards)
                 .args(&drive)
                 .arg("-display")
                 .arg(format!("dbus,addr={qemu_dbus_address}"))
@@ -168,6 +170,27 @@ impl Machine {
         println!("QEMU exited with status: {status}");
         Ok(())
     }
+}
+
+/// Sound Blaster 16 (220h, IRQ 5, DMA 1/5) and AdLib (OPL2 FM at 388h), the cards DOS games
+/// expect. Without one, a game set up for Sound Blaster calls a driver that isn't there and
+/// jumps into the interrupt table (seen as a JemmEx "exception 06" at 0000:00xx). They play
+/// into the silent snd0 audiodev for now. Only devices this QEMU build has are added.
+fn sound_card_args(qemu_bin: &str) -> Vec<String> {
+    let available = Command::new(qemu_bin)
+        .args(["-device", "help"])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default();
+    let mut args = Vec::new();
+    for card in ["sb16", "adlib"] {
+        if available.contains(&format!("name \"{card}\"")) {
+            args.extend(["-device".to_string(), format!("{card},audiodev=snd0")]);
+        } else {
+            eprintln!("sound: this QEMU has no {card} device; DOS programs won't find one");
+        }
+    }
+    args
 }
 
 /// KVM runs DOS directly on the host CPU; TCG emulates every instruction and costs far more.
