@@ -56,13 +56,28 @@
   .btn {
     display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border-radius: 8px; cursor: pointer;
     background: var(--panel-2); border: 1px solid var(--line); color: var(--text); white-space: nowrap;
-    transition: background .15s, border-color .15s, color .15s;
+
+    transition: background-color .15s, border-color .15s, color .15s;
+
   }
   .btn:hover { background: #242833; border-color: #3a4050; }
   .btn:active { transform: translateY(1px); }
-  .btn[aria-pressed="true"] { border-color: var(--amber-dim); color: var(--amber); background: #231c0c; }
+
+  .btn[aria-pressed="true"] {
+    color: #e8ebef;
+    border-color: #596372;
+    background: linear-gradient(#171a20, #20242b);
+    box-shadow: inset 0 2px 5px rgba(0,0,0,.55), 0 0 0 1px rgba(150,170,195,.05);
+  }
+
   .btn.danger:hover { border-color: #6a2a2a; color: #ff8a8a; }
-  .btn:focus-visible, select:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+  .btn:focus-visible, select:focus-visible {
+    outline: 1px solid #697484;
+    outline-offset: 2px;
+  }
+
+
 
   /* ---- monitor ---- */
   main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 14px; padding: 16px; }
@@ -77,7 +92,20 @@
     box-shadow: inset 0 0 40px rgba(0, 0, 0, .9); outline: 2px solid transparent; outline-offset: 3px;
     transition: outline-color .2s, box-shadow .2s;
   }
-  body.focused .glass { outline-color: var(--amber); box-shadow: inset 0 0 40px rgba(0, 0, 0, .9), 0 0 28px rgba(255, 176, 0, .18); }
+
+  body.focused .glass {
+    outline-color: rgba(110, 125, 145, .55);
+    box-shadow:
+      inset 0 0 42px rgba(0, 0, 0, .92),
+      0 0 0 1px rgba(150, 170, 195, .10),
+      0 0 22px rgba(80, 110, 145, .08);
+  }
+  body.focused .bezel-foot { color: #858b98; }
+  body.focused .bezel-foot .led {
+    background: #8da2b8;
+    box-shadow: 0 0 4px #8da2b8, 0 0 10px rgba(141, 162, 184, .35);
+  }
+
   /* Fill the glass and keep the guest's aspect ratio (it changes with the video mode). */
   #screen { display: block; width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; cursor: text; }
   .scanlines::after {
@@ -89,7 +117,21 @@
     position: absolute; left: 50%; transform: translateX(-50%); pointer-events: none;
     font: 12px/1 var(--mono); color: var(--text); transition: opacity .25s;
   }
-  .hint { bottom: 14px; white-space: nowrap; padding: 7px 12px; border-radius: 999px; background: rgba(12, 13, 17, .78); border: 1px solid var(--line); }
+
+  .hint {
+    bottom: 12px;
+    white-space: nowrap;
+    padding: 5px 9px;
+    border-radius: 3px;
+    font: 10px/1 var(--mono);
+    letter-spacing: .7px;
+    text-transform: uppercase;
+    color: #9299a5;
+    background: rgba(7, 8, 11, .86);
+    border: 1px solid #303640;
+    box-shadow: inset 0 1px rgba(255,255,255,.025), 0 2px 8px rgba(0,0,0,.45);
+  }
+
   body.focused .hint { opacity: 0; }
   .veil { inset: 0; left: 0; transform: none; display: grid; place-items: center; background: rgba(0, 0, 0, .55); opacity: 0; font-size: 14px; }
   body.offline .veil { opacity: 1; }
