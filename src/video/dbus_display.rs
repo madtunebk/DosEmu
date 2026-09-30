@@ -210,6 +210,8 @@ impl Listener {
 /// Convert pixels in a pixman format (`bpp << 24 | type << 16 | a << 12 | r << 8 | g << 4 | b`)
 /// to packed RGB24. Handles the ARGB/ABGR packed formats QEMU's VGA surfaces use.
 fn to_rgb(format: u32, stride: u32, width: u32, height: u32, data: &[u8]) -> Result<Vec<u8>, String> {
+    const X8R8G8B8: u32 = 0x2002_0888;
+    const A8R8G8B8: u32 = 0x2002_8888;
     const TYPE_ARGB: u32 = 2;
     const TYPE_ABGR: u32 = 3;
     let bpp = format >> 24;
@@ -233,6 +235,16 @@ fn to_rgb(format: u32, stride: u32, width: u32, height: u32, data: &[u8]) -> Res
     };
 
     let mut rgb = Vec::with_capacity(width * height * 3);
+    if format == X8R8G8B8 || format == A8R8G8B8 {
+        // The common case (32-bit VGA surfaces): little-endian B, G, R, X bytes. A full-screen
+        // game frame arrives ~30 times a second, so this must stay well under 33 ms.
+        for row in data.chunks(stride).take(height) {
+            for px in row[..width * 4].chunks_exact(4) {
+                rgb.extend_from_slice(&[px[2], px[1], px[0]]);
+            }
+        }
+        return Ok(rgb);
+    }
     for row in data.chunks(stride).take(height) {
         for px in row[..width * bytes].chunks_exact(bytes) {
             let pixel = px.iter().rev().fold(0u32, |acc, &byte| acc << 8 | byte as u32);
@@ -255,6 +267,12 @@ mod tests {
         // Little-endian BGRX bytes, one row of two pixels plus stride padding.
         let data = [0x10, 0x20, 0x30, 0, 0xff, 0x00, 0x80, 0, 9, 9, 9, 9];
         assert_eq!(to_rgb(0x2002_0888, 12, 2, 1, &data).unwrap(), [0x30, 0x20, 0x10, 0x80, 0x00, 0xff]);
+    }
+
+    #[test]
+    fn converts_a8r8g8b8() {
+        let data = [0x10, 0x20, 0x30, 0xff];
+        assert_eq!(to_rgb(0x2002_8888, 4, 1, 1, &data).unwrap(), [0x30, 0x20, 0x10]);
     }
 
     #[test]
