@@ -17,14 +17,14 @@ const CAPTURE_FPS: u32 = 10;
 const DEFAULT_WEB_ADDR: &str = "127.0.0.1:3000";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let image = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("images/FD14FULL.img"));
+    let mut args = std::env::args().skip(1).map(PathBuf::from);
+    let image = args.next().unwrap_or_else(|| PathBuf::from("images/FD14FULL.img"));
+    // Optional raw hard disk image created by the user, e.g. `qemu-img create -f raw c.img 500M`.
+    let extra_disk = args.next();
 
     println!("Starting DOS VM with image: {}", image.display());
 
-    let mut machine = session::Machine::start(&image)?;
+    let mut machine = session::Machine::start(&image, extra_disk.as_deref())?;
     println!("QMP socket ready at: {}", machine.qmp_socket.display());
 
     let mut qmp = session::QmpClient::connect(&machine.bridge_socket)?;
