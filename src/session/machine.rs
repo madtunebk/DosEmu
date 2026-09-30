@@ -81,11 +81,15 @@ impl Machine {
             .to_string();
 
         let sound_cards = sound_card_args(&qemu_bin);
-        let dbus_audio = has_dbus_audio(&qemu_bin);
+        // DOSLAB_SOUND=off keeps the sound cards (games need them) but exports no sound.
+        let sound_off = std::env::var("DOSLAB_SOUND").is_ok_and(|v| v == "off");
+        let dbus_audio = !sound_off && has_dbus_audio(&qemu_bin);
         let (audio_backend, display) = if dbus_audio {
             ("dbus,id=snd0", format!("dbus,addr={qemu_dbus_address},audiodev=snd0"))
         } else {
-            eprintln!("sound: this QEMU has no D-Bus audio backend; the browser will get no sound");
+            if !sound_off {
+                eprintln!("sound: this QEMU has no D-Bus audio backend; the browser will get no sound");
+            }
             ("none,id=snd0", format!("dbus,addr={qemu_dbus_address}"))
         };
         let qemu = |accel: &str| {
