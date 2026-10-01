@@ -3,10 +3,14 @@
 //! sender's clock and the sound card's never run at exactly the same speed).
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 /// Packets this far ahead of the expected one are treated as lost and replaced by silence;
 /// further means the sender restarted.
 const MAX_GAP: u16 = 32;
+/// Running out within this long of the last packet is a dropout; later, the sender just
+/// paused (PulseAudio stops sending when nothing plays).
+const PAUSE: Duration = Duration::from_millis(100);
 /// Most the playback speed is changed to correct drift: 0.5% is not audible.
 const MAX_ADJUST: f64 = 0.005;
 
@@ -18,6 +22,7 @@ pub struct Jitter {
     target: usize,
     /// Older frames are dropped beyond this: a stall must not leave the sound lagging behind.
     max: usize,
+    last_push: Option<Instant>,
     pub underruns: u64,
 }
 
@@ -29,12 +34,14 @@ impl Jitter {
             playing: false,
             target,
             max: target * 4,
+            last_push: None,
             underruns: 0,
         }
     }
 
     /// Add one packet of big-endian i16 samples with `channels` channels (1 or 2).
     pub fn push(&mut self, sequence: u16, payload: &[u8], channels: usize) {
+        self.last_push = Some(Instant::now());
         let sample = |b: &[u8]| f32::from(i16::from_be_bytes([b[0], b[1]])) / 32768.0;
         let frames = payload.chunks_exact(2 * channels).map(|frame| {
             let left = sample(frame);
@@ -105,7 +112,9 @@ impl Player {
         }
         let (Some(&a), Some(&b)) = (jitter.frames.front(), jitter.frames.get(1)) else {
             jitter.playing = false;
-            jitter.underruns += 1;
+            if jitter.last_push.is_some_and(|at| at.elapsed() < PAUSE) {
+                jitter.underruns += 1;
+            }
             return [0.0; 2];
         };
         let t = self.position as f32;
@@ -160,5 +169,17 @@ mod tests {
         player.next_frame(&mut jitter);
         assert_eq!(player.next_frame(&mut jitter), [0.0; 2]);
         assert_eq!(jitter.underruns, 1);
+    }
+
+    #[test]
+    fn running_out_after_the_sender_stops_is_a_pause() {
+        let mut jitter = Jitter::new(1);
+        let mut player = Player::new(48_000, 48_000);
+        jitter.push(0, &packet(100, 2), 2);
+        jitter.last_push = Some(std::time::Instant::now() - super::PAUSE * 2);
+        for _ in 0..3 {
+            player.next_frame(&mut jitter);
+        }
+        assert_eq!(jitter.underruns, 0);
     }
 }

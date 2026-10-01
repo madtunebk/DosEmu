@@ -56,7 +56,7 @@ pub fn run(options: Options) -> Result<(), Box<dyn Error>> {
         let mut jitter = jitter.lock().unwrap();
         jitter.push(packet.sequence, packet.payload, options.channels);
         if last_report.elapsed() > Duration::from_secs(10) && jitter.underruns != reported_underruns {
-            println!("Buffer ran dry {} times; try a bigger --latency", jitter.underruns - reported_underruns);
+            println!("Sound dropped out {} times; try a bigger --latency", jitter.underruns - reported_underruns);
             reported_underruns = jitter.underruns;
             last_report = Instant::now();
         }
