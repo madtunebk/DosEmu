@@ -23,7 +23,20 @@ pub struct Jitter {
     /// Older frames are dropped beyond this: a stall must not leave the sound lagging behind.
     max: usize,
     last_push: Option<Instant>,
+    pub stats: Stats,
+}
+
+/// Running totals of everything that can make the sound stutter.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct Stats {
+    /// Packets that never arrived (played as silence).
+    pub lost: u64,
+    /// Packets that arrived after their turn (dropped).
+    pub late: u64,
+    /// Times the buffer ran out while packets were still coming.
     pub underruns: u64,
+    /// Times the buffer overfilled and old sound was skipped.
+    pub trimmed: u64,
 }
 
 impl Jitter {
@@ -35,7 +48,7 @@ impl Jitter {
             target,
             max: target * 4,
             last_push: None,
-            underruns: 0,
+            stats: Stats::default(),
         }
     }
 
@@ -52,10 +65,14 @@ impl Jitter {
             match sequence.wrapping_sub(expected) {
                 0 => {}
                 gap if gap <= MAX_GAP => {
+                    self.stats.lost += u64::from(gap);
                     let lost = gap as usize * payload.len() / (2 * channels);
                     self.frames.extend(std::iter::repeat_n([0.0; 2], lost));
                 }
-                gap if gap >= 0x8000 => return, // late or duplicate
+                gap if gap >= 0x8000 => {
+                    self.stats.late += 1;
+                    return;
+                }
                 _ => self.reset(),
             }
         }
@@ -64,6 +81,7 @@ impl Jitter {
         if self.frames.len() > self.max {
             let excess = self.frames.len() - self.target;
             self.frames.drain(..excess);
+            self.stats.trimmed += 1;
         }
     }
 
@@ -113,7 +131,7 @@ impl Player {
         let (Some(&a), Some(&b)) = (jitter.frames.front(), jitter.frames.get(1)) else {
             jitter.playing = false;
             if jitter.last_push.is_some_and(|at| at.elapsed() < PAUSE) {
-                jitter.underruns += 1;
+                jitter.stats.underruns += 1;
             }
             return [0.0; 2];
         };
@@ -149,6 +167,7 @@ mod tests {
         assert_eq!(jitter.frames.len(), 9);
         jitter.push(11, &packet(1, 3), 2); // late
         assert_eq!(jitter.frames.len(), 9);
+        assert_eq!((jitter.stats.lost, jitter.stats.late), (1, 1));
         jitter.push(5000, &packet(1, 3), 2); // sender restarted
         assert_eq!(jitter.frames.len(), 3);
     }
@@ -168,7 +187,7 @@ mod tests {
         player.next_frame(&mut jitter);
         player.next_frame(&mut jitter);
         assert_eq!(player.next_frame(&mut jitter), [0.0; 2]);
-        assert_eq!(jitter.underruns, 1);
+        assert_eq!(jitter.stats.underruns, 1);
     }
 
     #[test]
@@ -180,6 +199,6 @@ mod tests {
         for _ in 0..3 {
             player.next_frame(&mut jitter);
         }
-        assert_eq!(jitter.underruns, 0);
+        assert_eq!(jitter.stats.underruns, 0);
     }
 }

@@ -1,12 +1,14 @@
 use std::error::Error;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
 
-use crate::jitter::{Jitter, Player};
+use socket2::{Domain, Protocol, Socket, Type};
+
+use crate::jitter::{Jitter, Player, Stats};
 use crate::rtp;
 
 pub struct Options {
@@ -35,7 +37,7 @@ pub fn run(options: Options) -> Result<(), Box<dyn Error>> {
     }?;
     stream.play()?;
 
-    let socket = UdpSocket::bind(("0.0.0.0", options.port))?;
+    let socket = bind(options.port)?;
     println!(
         "Listening on UDP port {} ({} Hz, {} ch, {} ms buffer); sound card: {} Hz, {} ch, {format}",
         options.port, options.rate, options.channels, options.latency_ms, config.sample_rate, config.channels
@@ -45,7 +47,7 @@ pub fn run(options: Options) -> Result<(), Box<dyn Error>> {
     let mut buf = [0u8; 65536];
     let mut sender: Option<SocketAddr> = None;
     let mut last_report = Instant::now();
-    let mut reported_underruns = 0;
+    let mut reported = Stats::default();
     loop {
         let (len, from) = socket.recv_from(&mut buf)?;
         let Some(packet) = rtp::parse(&buf[..len]) else { continue };
@@ -53,14 +55,46 @@ pub fn run(options: Options) -> Result<(), Box<dyn Error>> {
             println!("Receiving from {from}");
             sender = Some(from);
         }
-        let mut jitter = jitter.lock().unwrap();
-        jitter.push(packet.sequence, packet.payload, options.channels);
-        if last_report.elapsed() > Duration::from_secs(10) && jitter.underruns != reported_underruns {
-            println!("Sound dropped out {} times; try a bigger --latency", jitter.underruns - reported_underruns);
-            reported_underruns = jitter.underruns;
+        let stats = {
+            let mut jitter = jitter.lock().unwrap();
+            jitter.push(packet.sequence, packet.payload, options.channels);
+            jitter.stats
+        };
+        if last_report.elapsed() >= REPORT_EVERY && stats != reported {
+            report(&reported, &stats);
+            reported = stats;
             last_report = Instant::now();
         }
     }
+}
+
+const REPORT_EVERY: Duration = Duration::from_secs(5);
+
+/// One line of what went wrong since the last report.
+fn report(before: &Stats, now: &Stats) {
+    let mut parts = Vec::new();
+    for (count, what) in [
+        (now.lost - before.lost, "packets lost on the network"),
+        (now.late - before.late, "packets arrived too late"),
+        (now.underruns - before.underruns, "dropouts (packets came too slowly: try a bigger --latency)"),
+        (now.trimmed - before.trimmed, "skips (packets came in a burst)"),
+    ] {
+        if count > 0 {
+            parts.push(format!("{count} {what}"));
+        }
+    }
+    println!("Last {} s: {}", REPORT_EVERY.as_secs(), parts.join(", "));
+}
+
+/// A UDP socket with a big receive buffer: Windows' default is small enough that a short
+/// hiccup in this thread overflows it and loses packets.
+fn bind(port: u16) -> std::io::Result<UdpSocket> {
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    if let Err(err) = socket.set_recv_buffer_size(1 << 20) {
+        eprintln!("could not enlarge the receive buffer: {err}");
+    }
+    socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
+    Ok(socket.into())
 }
 
 fn play<T>(
