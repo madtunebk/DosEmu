@@ -17,14 +17,18 @@ Windows (allow it through the firewall the first time):
 rtp-audio.exe
 ```
 
-WSL (needs `pulseaudio-utils` for `pactl`/`parec`):
+Linux or WSL (needs `pulseaudio-utils` for `pactl`/`parec`; works with PipeWire too):
 
 ```bash
-./wsl-send.sh            # Ctrl+C stops and switches sound back
+./send.sh                       # all sound, to Windows as seen from WSL
+./send.sh 192.168.1.20          # on a real machine: the Windows PC's IP (ipconfig)
+./send.sh -l                    # list sources
+./send.sh -s 3 192.168.1.20     # send one source: a microphone, or <speakers>.monitor to
+                                # send a copy and keep playing here
 ```
 
-`wsl-send.sh` makes a "Windows" output, sets it as default, moves apps already playing onto it,
-and sends it to Windows. With WSL mirrored networking use `./wsl-send.sh 127.0.0.1`.
+Without `-s`, `send.sh` makes a "Windows" output, sets it as default and moves apps already
+playing onto it; Ctrl+C switches everything back. With WSL mirrored networking use `127.0.0.1`.
 
 Options (receiver): `--port 46000`, `--latency 60` (buffer in ms; raise it if it crackles),
 `--rate 48000`, `--channels 2`.

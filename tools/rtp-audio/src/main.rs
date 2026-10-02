@@ -17,7 +17,7 @@ usage:
   rtp-audio send <host:port> [--rate 48000] [--channels 2]
       send raw big-endian 16-bit PCM from stdin, e.g.
       parec -d windows.monitor --raw --format=s16be --rate=48000 --channels=2 --latency-msec=20 \\
-        | rtp-audio send 172.20.0.1:46000";
+        | rtp-audio send 172.20.0.1:46000   (send.sh does this for you)";
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
